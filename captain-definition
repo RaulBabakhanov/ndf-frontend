@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 2,
+  "dockerfilePath": "./Dockerfile",
+  "imageName": "ndf-frontend:latest",
+  "ports": ["80"]
+}
