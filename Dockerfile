@@ -3,6 +3,9 @@ FROM node:22-alpine as builder
 
 WORKDIR /app
 
+ARG VITE_API_URL=https://api.ndf.allspacesoftware.com/api/v1
+ENV VITE_API_URL=${VITE_API_URL}
+
 # Copy package files
 COPY package.json package-lock.json* ./
 

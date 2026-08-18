@@ -1,4 +1,4 @@
-const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000/api/v1'
+const API_URL = import.meta.env.VITE_API_URL ?? 'https://api.ndf.allspacesoftware.com/api/v1'
 
 export interface DealerDto {
   id: number
@@ -6,6 +6,7 @@ export interface DealerDto {
   official: string
   tax_number: string
   city: string
+  address: string
   phone: string
   email: string
   discount_percent: string
@@ -17,11 +18,39 @@ export interface AuthDto {
   dealer: DealerDto
 }
 
+export interface RegistrationDto {
+  message: string
+  dealer: DealerDto
+}
+
+export interface ProductDto {
+  id: number
+  name: string
+  category: string
+  price_usd: string
+  price_try: string | null
+  price_eur: string | null
+  default_currency: 'TRY' | 'USD' | 'EUR'
+  image_url: string
+  external_url: string
+  stock: number
+}
+
+export interface ProductPageDto {
+  items: ProductDto[]
+  total: number
+  page: number
+  size: number
+}
+
 export interface OrderDto {
   id: number
   order_number: string
   status: string
   note: string
+  shipping_address: string
+  shipping_company: string
+  tracking_number: string
   total_try: string
   created_at: string
   items: Array<{ product_id: number; quantity: number; unit_price_try: string }>
@@ -45,17 +74,29 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   })
   if (!response.ok) {
     const body = await response.json().catch(() => ({ detail: 'Sunucu hatası' }))
-    const message = response.status === 401 ? 'Oturum süreniz doldu. Lütfen tekrar giriş yapın.' : (body.detail ?? 'İşlem tamamlanamadı')
+    const message = body.detail ?? 'İşlem tamamlanamadı'
     throw new ApiError(response.status, message)
   }
   return response.json() as Promise<T>
 }
 
 export const api = {
-  register: (payload: Record<string, string>) => request<AuthDto>('/auth/register', { method: 'POST', body: JSON.stringify(payload) }),
-  login: (email: string, password: string) => request<AuthDto>('/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
+  register: (payload: Record<string, string>) => request<RegistrationDto>('/auth/register', { method: 'POST', body: JSON.stringify(payload) }),
+  login: (email: string, password: string, turnstileToken: string) => request<AuthDto>('/auth/login', { method: 'POST', body: JSON.stringify({ email, password, turnstile_token: turnstileToken, website: '' }) }),
   me: () => request<DealerDto>('/auth/me'),
+  products: (page = 1, size = 100) => request<ProductPageDto>(`/products?page=${page}&size=${size}`),
   orders: () => request<OrderDto[]>('/orders'),
-  createOrder: (items: Array<{ product_id: number; quantity: number }>, note: string) =>
-    request<OrderDto>('/orders', { method: 'POST', body: JSON.stringify({ items, note }) }),
+  createOrder: (items: Array<{ product_id: number; quantity: number }>, note: string, shippingAddress: string) =>
+    request<OrderDto>('/orders', { method: 'POST', body: JSON.stringify({ items, note, shipping_address: shippingAddress }) }),
+}
+
+export function resolveApiAssetUrl(path: string): string {
+  if (!path) return ''
+  try {
+    const parsed = new URL(path, new URL(API_URL).origin)
+    if (parsed.pathname.startsWith('/uploads/')) return `${new URL(API_URL).origin}${parsed.pathname}`
+    return parsed.toString()
+  } catch {
+    return path
+  }
 }

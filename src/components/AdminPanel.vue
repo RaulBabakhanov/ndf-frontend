@@ -8,7 +8,9 @@ interface Dealer {
   email: string
   phone: string
   city: string
+  address: string
   discount_percent: string
+  is_approved: boolean
   created_at: string
 }
 interface Order {
@@ -16,9 +18,12 @@ interface Order {
   order_number: string
   status: string
   note: string
+  shipping_address: string
+  shipping_company: string
+  tracking_number: string
   total_try: string
   created_at: string
-  dealer: { company: string; official: string; email: string; phone: string }
+  dealer: { company: string; official: string; email: string; phone: string; address: string }
   items: Array<{ name: string; quantity: number; unit_price_try: string }>
 }
 type Currency = 'TRY' | 'USD' | 'EUR'
@@ -61,6 +66,7 @@ const dealerForm = ref({
   official: '',
   tax_number: '',
   city: '',
+  address: '',
   phone: '',
   email: '',
   password: '',
@@ -73,6 +79,9 @@ const search = ref('')
 const productSearch = ref('')
 const productStockFilter = ref<'all' | 'available' | 'low' | 'out'>('all')
 const savingProductId = ref<number | null>(null)
+const deletingProductId = ref<number | null>(null)
+const savingOrderStatusId = ref<number | null>(null)
+const savingShippingId = ref<number | null>(null)
 const deletingDealerId = ref<number | null>(null)
 const expandedOrderId = ref<number | null>(null)
 const success = ref('')
@@ -80,7 +89,9 @@ const activeSection = ref<
   'overview' | 'orders' | 'dealers' | 'dealer-create' | 'products' | 'analytics'
 >('overview')
 const orderFilter = ref('Tümü')
-const apiUrl = import.meta.env.VITE_API_URL ?? 'http://localhost:8000/api/v1'
+const orderStatuses = ['Onaylandı', 'Hazırlanıyor', 'Kargoda', 'Tamamlandı', 'İptal'] as const
+const orderFilters = ['Tümü', ...orderStatuses]
+const apiUrl = import.meta.env.VITE_API_URL ?? 'https://api.ndf.allspacesoftware.com/api/v1'
 const money = (value: string | number) =>
   new Intl.NumberFormat('tr-TR', { style: 'currency', currency: 'TRY' }).format(Number(value))
 const date = (value: string) =>
@@ -120,7 +131,12 @@ function cleanText(value: string) {
     'Ã‡': 'Ç', 'Ã§': 'ç', 'Ä°': 'İ', 'Ä±': 'ı', 'Ã–': 'Ö', 'Ã¶': 'ö',
     'Ãœ': 'Ü', 'Ã¼': 'ü', 'Äž': 'Ğ', 'ÄŸ': 'ğ', 'Åž': 'Ş', 'ÅŸ': 'ş',
   }
-  for (let pass = 0; pass < 2; pass++) {
+  Object.assign(replacements, {
+    'Ã‡': 'Ç', 'Ã§': 'ç', 'Ä°': 'İ', 'Ä±': 'ı', 'Ã–': 'Ö', 'Ã¶': 'ö',
+    'Ãœ': 'Ü', 'Ã¼': 'ü', 'Äž': 'Ğ', 'ÄŸ': 'ğ', 'Åž': 'Ş', 'ÅŸ': 'ş',
+    'Â°': '°', 'Â·': '·', 'â€“': '–', 'â€”': '—', 'â€™': '’', 'â€œ': '“', 'â€': '”',
+  })
+  for (let pass = 0; pass < 3; pass++) {
     for (const [broken, correct] of Object.entries(replacements)) result = result.replaceAll(broken, correct)
   }
   return result
@@ -133,8 +149,8 @@ const visibleProducts = computed(() =>
       .includes(query)
     const matchesStock =
       productStockFilter.value === 'all' ||
-      (productStockFilter.value === 'available' && product.stock > 5) ||
-      (productStockFilter.value === 'low' && product.stock > 0 && product.stock <= 5) ||
+      (productStockFilter.value === 'available' && product.stock > 0) ||
+      (productStockFilter.value === 'low' && product.stock > 0 && product.stock <= 2) ||
       (productStockFilter.value === 'out' && product.stock === 0)
     return matchesSearch && matchesStock
   }),
@@ -182,8 +198,15 @@ async function login() {
       throw new Error(response.status === 401 ? 'Yönetici anahtarı hatalı.' : 'Veriler alınamadı.')
     const data = await response.json()
     dealers.value = data.dealers
-    orders.value = data.orders
-    products.value = data.products
+    orders.value = data.orders.map((order: Order) => ({
+      ...order,
+      items: order.items.map((item) => ({ ...item, name: cleanText(item.name) })),
+    }))
+    products.value = data.products.map((product: AdminProduct) => ({
+      ...product,
+      name: cleanText(product.name),
+      category: cleanText(product.category),
+    }))
     authenticated.value = true
     sessionStorage.setItem('ndfAdminKey', adminKey.value)
   } catch (reason) {
@@ -194,6 +217,57 @@ async function login() {
 }
 async function refreshData() {
   await login()
+}
+async function updateOrderStatus(order: Order) {
+  error.value = ''
+  success.value = ''
+  savingOrderStatusId.value = order.id
+  const response = await fetch(`${apiUrl}/admin/orders/${order.id}/status`, {
+    method: 'PATCH',
+    headers: { 'X-Admin-Key': adminKey.value, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: order.status }),
+  })
+  if (!response.ok) {
+    savingOrderStatusId.value = null
+    await refreshData()
+    return void (error.value =
+      (await response.json().catch(() => ({}))).detail || 'Sipariş durumu güncellenemedi.')
+  }
+  savingOrderStatusId.value = null
+  success.value = `#${order.order_number} durumu ${order.status} olarak güncellendi.`
+}
+function statusClass(status: string) {
+  return {
+    'Onaylandı': 'approved',
+    'Hazırlanıyor': 'preparing',
+    'Kargoda': 'shipping',
+    'Tamamlandı': 'completed',
+    'İptal': 'cancelled',
+  }[status] || 'preparing'
+}
+async function saveShipping(order: Order) {
+  if (order.shipping_company.trim().length < 2 || order.tracking_number.trim().length < 3) {
+    return void (error.value = 'Kargo firması ve geçerli takip numarası gereklidir.')
+  }
+  error.value = ''
+  success.value = ''
+  savingShippingId.value = order.id
+  const response = await fetch(`${apiUrl}/admin/orders/${order.id}/shipping`, {
+    method: 'PATCH',
+    headers: { 'X-Admin-Key': adminKey.value, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      shipping_company: order.shipping_company,
+      tracking_number: order.tracking_number,
+    }),
+  })
+  if (!response.ok) {
+    savingShippingId.value = null
+    return void (error.value =
+      (await response.json().catch(() => ({}))).detail || 'Kargo bilgileri kaydedilemedi.')
+  }
+  order.status = 'Kargoda'
+  savingShippingId.value = null
+  success.value = `#${order.order_number} kargoya verildi.`
 }
 function logout() {
   authenticated.value = false
@@ -241,7 +315,7 @@ function printOrder(order: Order) {
     )
     .join('')
   popup.document.write(
-    `<!doctype html><html lang="tr"><head><meta charset="utf-8"><title>${escapeHtml(order.order_number)} Sipariş</title><style>@page{size:A4;margin:18mm}*{box-sizing:border-box}body{margin:0;color:#142b55;font:14px Arial,sans-serif}.header{display:flex;justify-content:space-between;align-items:center;padding-bottom:22px;border-bottom:3px solid #174b95}.logo{padding:12px 15px;border-radius:9px;background:#174b95;color:#fff;font-size:25px;font-weight:900;letter-spacing:5px}.header h1{margin:0;font-size:25px}.header p{margin:6px 0 0;color:#6f7d92}.info{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin:28px 0}.box{padding:18px;border:1px solid #dce3ee;border-radius:10px}.box h3{margin:0 0 13px;color:#174b95;font-size:12px;text-transform:uppercase}.box p{margin:7px 0}.box span{color:#78869a}table{width:100%;border-collapse:collapse}th,td{padding:13px;text-align:left;border-bottom:1px solid #e1e6ee}th{background:#f0f4fa;color:#52617a;font-size:11px}td:nth-child(n+2),th:nth-child(n+2){text-align:right}.total{margin-top:22px;text-align:right;font-size:22px;font-weight:800}.note{margin-top:25px;padding:17px;border-radius:9px;background:#f4f7fb}.footer{margin-top:45px;padding-top:14px;border-top:1px solid #dce3ee;color:#8692a4;font-size:10px;text-align:center}@media print{button{display:none}}</style></head><body><div class="header"><div class="logo">NDF</div><div><h1>Sipariş Belgesi</h1><p>#${escapeHtml(order.order_number)}</p></div></div><div class="info"><div class="box"><h3>Bayi Bilgileri</h3><p><strong>${escapeHtml(order.dealer.company)}</strong></p><p><span>Yetkili:</span> ${escapeHtml(order.dealer.official)}</p><p><span>E-posta:</span> ${escapeHtml(order.dealer.email)}</p><p><span>Telefon:</span> ${escapeHtml(order.dealer.phone)}</p></div><div class="box"><h3>Sipariş Bilgileri</h3><p><span>Tarih:</span> ${escapeHtml(date(order.created_at))}</p><p><span>Durum:</span> ${escapeHtml(order.status)}</p></div></div><table><thead><tr><th>Ürün</th><th>Adet</th><th>Birim fiyat</th><th>Toplam</th></tr></thead><tbody>${items}</tbody></table><div class="total">Genel Toplam: ${escapeHtml(money(order.total_try))}</div>${order.note ? `<div class="note"><strong>Sipariş Notu</strong><p>${escapeHtml(order.note)}</p></div>` : ''}<div class="footer">NDF Makina · Bu belge yönetim panelinden oluşturulmuştur.</div><script>window.onload=()=>setTimeout(()=>window.print(),250)<\/script></body></html>`,
+    `<!doctype html><html lang="tr"><head><meta charset="utf-8"><title>${escapeHtml(order.order_number)} Sipariş</title><style>@page{size:A4;margin:18mm}*{box-sizing:border-box}body{margin:0;color:#142b55;font:14px Arial,sans-serif}.header{display:flex;justify-content:space-between;align-items:center;padding-bottom:22px;border-bottom:3px solid #174b95}.logo{padding:12px 15px;border-radius:9px;background:#174b95;color:#fff;font-size:25px;font-weight:900;letter-spacing:5px}.header h1{margin:0;font-size:25px}.header p{margin:6px 0 0;color:#6f7d92}.info{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin:28px 0}.box{padding:18px;border:1px solid #dce3ee;border-radius:10px}.box h3{margin:0 0 13px;color:#174b95;font-size:12px;text-transform:uppercase}.box p{margin:7px 0}.box span{color:#78869a}table{width:100%;border-collapse:collapse}th,td{padding:13px;text-align:left;border-bottom:1px solid #e1e6ee}th{background:#f0f4fa;color:#52617a;font-size:11px}td:nth-child(n+2),th:nth-child(n+2){text-align:right}.total{margin-top:22px;text-align:right;font-size:22px;font-weight:800}.note{margin-top:15px;padding:17px;border-radius:9px;background:#f4f7fb}.footer{margin-top:45px;padding-top:14px;border-top:1px solid #dce3ee;color:#8692a4;font-size:10px;text-align:center}@media print{button{display:none}}</style></head><body><div class="header"><div class="logo">NDF</div><div><h1>Sipariş Belgesi</h1><p>#${escapeHtml(order.order_number)}</p></div></div><div class="info"><div class="box"><h3>Bayi Bilgileri</h3><p><strong>${escapeHtml(order.dealer.company)}</strong></p><p><span>Yetkili:</span> ${escapeHtml(order.dealer.official)}</p><p><span>E-posta:</span> ${escapeHtml(order.dealer.email)}</p><p><span>Telefon:</span> ${escapeHtml(order.dealer.phone)}</p></div><div class="box"><h3>Sipariş Bilgileri</h3><p><span>Tarih:</span> ${escapeHtml(date(order.created_at))}</p><p><span>Durum:</span> ${escapeHtml(order.status)}</p></div></div><table><thead><tr><th>Ürün</th><th>Adet</th><th>Birim fiyat</th><th>Toplam</th></tr></thead><tbody>${items}</tbody></table><div class="total">Genel Toplam: ${escapeHtml(money(order.total_try))}</div>${order.shipping_address ? `<div class="note"><strong>Teslimat Adresi</strong><p>${escapeHtml(order.shipping_address)}</p></div>` : ''}${order.note ? `<div class="note"><strong>Sipariş Notu</strong><p>${escapeHtml(order.note)}</p></div>` : ''}<div class="footer">NDF Makina · Bu belge yönetim panelinden oluşturulmuştur.</div><script>window.onload=()=>setTimeout(()=>window.print(),250)<\/script></body></html>`,
   )
   popup.document.close()
 }
@@ -309,6 +383,24 @@ async function saveProduct(product: AdminProduct) {
   savingProductId.value = null
   success.value = `${product.name} güncellendi.`
 }
+async function deleteProduct(product: AdminProduct) {
+  if (!window.confirm(`${product.name} ürününü silmek istediğinize emin misiniz?`)) return
+  error.value = ''
+  success.value = ''
+  deletingProductId.value = product.id
+  const response = await fetch(`${apiUrl}/admin/products/${product.id}`, {
+    method: 'DELETE',
+    headers: { 'X-Admin-Key': adminKey.value },
+  })
+  if (!response.ok) {
+    deletingProductId.value = null
+    return void (error.value =
+      (await response.json().catch(() => ({}))).detail || 'Ürün silinemedi.')
+  }
+  await refreshData()
+  deletingProductId.value = null
+  success.value = `${product.name} silindi.`
+}
 async function addDealer() {
   const response = await fetch(`${apiUrl}/admin/dealers`, {
     method: 'POST',
@@ -323,6 +415,7 @@ async function addDealer() {
     official: '',
     tax_number: '',
     city: '',
+    address: '',
     phone: '',
     email: '',
     password: '',
@@ -341,6 +434,22 @@ async function saveDealerDiscount(dealer: Dealer) {
     return void (error.value =
       (await response.json().catch(() => ({}))).detail || 'Cari indirimi kaydedilemedi.')
   await refreshData()
+}
+async function setDealerApproval(dealer: Dealer, isApproved: boolean) {
+  error.value = ''
+  success.value = ''
+  const response = await fetch(`${apiUrl}/admin/dealers/${dealer.id}/approval`, {
+    method: 'PATCH',
+    headers: { 'X-Admin-Key': adminKey.value, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ is_approved: isApproved }),
+  })
+  if (!response.ok)
+    return void (error.value =
+      (await response.json().catch(() => ({}))).detail || 'Bayi onay durumu güncellenemedi.')
+  await refreshData()
+  success.value = isApproved
+    ? `${dealer.company} onaylandı ve artık giriş yapabilir.`
+    : `${dealer.company} pasifleştirildi.`
 }
 async function deleteDealer(dealer: Dealer) {
   if (
@@ -586,12 +695,12 @@ async function deleteDealer(dealer: Dealer) {
             </div>
             <section v-else-if="activeSection === 'orders'" class="orders-workspace">
               <div class="orders-hero"><div><span>SİPARİŞ OPERASYONU</span><h2>Siparişleri yönetin</h2><p>Satış hareketlerini inceleyin, ürün detaylarını açın ve belgeleri hazırlayın.</p></div><button class="export-orders" @click="exportOrders">↓ Excel / CSV indir</button></div>
-              <div class="order-metrics"><article><span>Toplam sipariş</span><strong>{{ visibleOrders.length }}</strong><small>Filtrelenen kayıt</small></article><article><span>Ürün adedi</span><strong>{{ visibleOrderItems }}</strong><small>Siparişlerdeki toplam</small></article><article><span>Satış tutarı</span><strong>{{ money(visibleOrderSales) }}</strong><small>Filtrelenen ciro</small></article><article class="pending"><span>Hazırlanıyor</span><strong>{{ orders.filter(order => order.status.includes('Hazır')).length }}</strong><small>İşlem bekleyen</small></article></div>
-              <div class="orders-toolbar"><label>⌕<input v-model="search" placeholder="Sipariş no, bayi veya ürün ara..." /></label><div class="filter-pills"><button v-for="filter in ['Tümü', 'Hazırlanıyor', 'Tamamlandı']" :key="filter" :class="{ active: orderFilter === filter }" @click="orderFilter = filter">{{ filter }}</button></div><button title="Siparişleri yenile" class="orders-refresh" @click="refreshData">↻ Yenile</button></div>
+              <div class="order-metrics"><article><span>Toplam sipariş</span><strong>{{ visibleOrders.length }}</strong><small>Filtrelenen kayıt</small></article><article><span>Ürün adedi</span><strong>{{ visibleOrderItems }}</strong><small>Siparişlerdeki toplam</small></article><article><span>Satış tutarı</span><strong>{{ money(visibleOrderSales) }}</strong><small>Filtrelenen ciro</small></article><article class="pending"><span>Aktif operasyon</span><strong>{{ orders.filter(order => !['Tamamlandı', 'İptal'].includes(order.status)).length }}</strong><small>İşlem bekleyen sipariş</small></article></div>
+              <div class="orders-toolbar"><label>⌕<input v-model="search" placeholder="Sipariş no, bayi veya ürün ara..." /></label><div class="filter-pills"><button v-for="filter in orderFilters" :key="filter" :class="{ active: orderFilter === filter }" @click="orderFilter = filter">{{ filter }}</button></div><button title="Siparişleri yenile" class="orders-refresh" @click="refreshData">↻ Yenile</button></div>
               <div v-if="visibleOrders.length" class="advanced-order-list">
                 <article v-for="order in visibleOrders" :key="order.id" :class="{ expanded: expandedOrderId === order.id }">
-                  <div class="order-main"><span class="order-avatar">{{ order.dealer.company.charAt(0).toUpperCase() }}</span><div class="order-identity"><small>SİPARİŞ NO</small><strong>#{{ order.order_number }}</strong><span>{{ order.dealer.company }} · {{ order.dealer.official }}</span></div><div class="order-product-preview"><small>ÜRÜNLER</small><strong>{{ order.items.reduce((sum, item) => sum + item.quantity, 0) }} ürün</strong><span>{{ cleanText(order.items[0]?.name || '') }}<template v-if="order.items.length > 1"> +{{ order.items.length - 1 }} kalem</template></span></div><div class="order-date"><small>TARİH</small><strong>{{ date(order.created_at) }}</strong></div><div class="order-amount"><small>TOPLAM</small><strong>{{ money(order.total_try) }}</strong></div><em>{{ order.status }}</em><div class="order-actions"><button @click="expandedOrderId = expandedOrderId === order.id ? null : order.id">{{ expandedOrderId === order.id ? 'Kapat' : 'Detay' }}</button><button class="pdf-button" @click="printOrder(order)">▣ PDF</button></div></div>
-                  <div v-if="expandedOrderId === order.id" class="order-details"><header><strong>Sipariş içeriği</strong><span>{{ order.items.length }} farklı kalem</span></header><div v-for="item in order.items" :key="item.name" class="order-detail-row"><span>{{ item.quantity }}×</span><strong>{{ cleanText(item.name) }}</strong><small>{{ money(item.unit_price_try) }} / adet</small><b>{{ money(Number(item.unit_price_try) * item.quantity) }}</b></div><footer v-if="order.note"><span>Sipariş notu</span><p>{{ order.note }}</p></footer></div>
+                  <div class="order-main"><span class="order-avatar">{{ order.dealer.company.charAt(0).toUpperCase() }}</span><div class="order-identity"><small>SİPARİŞ NO</small><strong>#{{ order.order_number }}</strong><span>{{ order.dealer.company }} · {{ order.dealer.official }}</span></div><div class="order-product-preview"><small>ÜRÜNLER</small><strong>{{ order.items.reduce((sum, item) => sum + item.quantity, 0) }} ürün</strong><span>{{ cleanText(order.items[0]?.name || '') }}<template v-if="order.items.length > 1"> +{{ order.items.length - 1 }} kalem</template></span></div><div class="order-date"><small>TARİH</small><strong>{{ date(order.created_at) }}</strong></div><div class="order-amount"><small>TOPLAM</small><strong>{{ money(order.total_try) }}</strong></div><label :class="['order-status-control', statusClass(order.status)]"><small>DURUM</small><select v-model="order.status" :disabled="savingOrderStatusId === order.id" @change="updateOrderStatus(order)"><option v-for="status in orderStatuses" :key="status">{{ status }}</option></select></label><div class="order-actions"><button @click="expandedOrderId = expandedOrderId === order.id ? null : order.id">{{ expandedOrderId === order.id ? 'Kapat' : 'Detay' }}</button><button class="pdf-button" @click="printOrder(order)">▣ PDF</button></div></div>
+                  <div v-if="expandedOrderId === order.id" class="order-details"><header><strong>Sipariş içeriği</strong><span>{{ order.items.length }} farklı kalem</span></header><div v-for="item in order.items" :key="item.name" class="order-detail-row"><span>{{ item.quantity }}×</span><strong>{{ cleanText(item.name) }}</strong><small>{{ money(item.unit_price_try) }} / adet</small><b>{{ money(Number(item.unit_price_try) * item.quantity) }}</b></div><section class="shipping-editor"><div><span>🚚</span><p><strong>Kargo ve takip</strong><small>Bilgiler kaydedildiğinde sipariş Kargoda durumuna geçer.</small></p></div><label>Kargo firması<input v-model.trim="order.shipping_company" list="shipping-companies" placeholder="Firma seçin" /></label><label>Takip numarası<input v-model.trim="order.tracking_number" placeholder="Takip numarasını girin" /></label><button :disabled="savingShippingId === order.id" @click="saveShipping(order)">{{ savingShippingId === order.id ? 'Kaydediliyor…' : 'Kargoya ver' }}</button><datalist id="shipping-companies"><option>Yurtiçi Kargo</option><option>Aras Kargo</option><option>MNG Kargo</option><option>Sürat Kargo</option><option>PTT Kargo</option><option>Hepsijet</option><option>Trendyol Express</option></datalist></section><footer v-if="order.shipping_address || order.note"><div v-if="order.shipping_address"><span>TESLİMAT ADRESİ</span><p>{{ order.shipping_address }}</p></div><div v-if="order.note"><span>SİPARİŞ NOTU</span><p>{{ order.note }}</p></div></footer></div>
                 </article>
               </div>
               <div v-else class="smart-empty order-empty"><div>▤</div><h3>Sipariş bulunamadı</h3><p>Arama metnini veya durum filtresini değiştirerek tekrar deneyin.</p><button @click="search = ''; orderFilter = 'Tümü'">Filtreleri temizle</button></div>
@@ -609,7 +718,7 @@ async function deleteDealer(dealer: Dealer) {
               <div v-if="dealers.length" class="dealer-table">
                 <div class="head">
                   <span>Firma</span><span>Yetkili</span><span>İletişim</span><span>Şehir</span
-                  ><span>Özel indirim</span><span>Kayıt tarihi</span><span>İşlem</span>
+                  ><span>Durum</span><span>Özel indirim</span><span>Kayıt tarihi</span><span>İşlem</span>
                 </div>
                 <div v-for="dealer in dealers" :key="dealer.id">
                   <strong>{{ dealer.company }}</strong
@@ -617,6 +726,10 @@ async function deleteDealer(dealer: Dealer) {
                   ><span
                     >{{ dealer.email }}<small>{{ dealer.phone }}</small></span
                   ><span>{{ dealer.city }}</span
+                  ><span><button
+                    :class="['approval-button', { approved: dealer.is_approved }]"
+                    @click="setDealerApproval(dealer, !dealer.is_approved)"
+                  >{{ dealer.is_approved ? 'Onaylı · Pasifleştir' : 'Bekliyor · Onayla' }}</button></span
                   ><span class="discount-editor"
                     ><input
                       v-model="dealer.discount_percent"
@@ -669,7 +782,7 @@ async function deleteDealer(dealer: Dealer) {
               </article>
               <article>
                 <span>Kritik stok</span
-                ><strong>{{ products.filter((p) => p.stock > 0 && p.stock <= 5).length }}</strong>
+                ><strong>{{ products.filter((p) => p.stock > 0 && p.stock <= 2).length }}</strong>
               </article>
               <article class="danger">
                 <span>Stokta yok</span
@@ -777,18 +890,18 @@ async function deleteDealer(dealer: Dealer) {
                 ><em
                   :class="{
                     out: product.stock === 0,
-                    low: product.stock > 0 && product.stock <= 5,
+                    low: product.stock > 0 && product.stock <= 2,
                   }"
                   >{{
                     product.stock === 0
                       ? 'Stok bitti'
-                      : product.stock <= 5
+                      : product.stock <= 2
                         ? 'Kritik stok'
                         : 'Stokta'
                   }}</em
-                ><button :disabled="savingProductId === product.id" @click="saveProduct(product)">
+                ><div class="product-row-actions"><button :disabled="savingProductId === product.id" @click="saveProduct(product)">
                   {{ savingProductId === product.id ? 'Kaydediliyor…' : 'Kaydet' }}
-                </button>
+                </button><button class="delete-product" :disabled="deletingProductId === product.id" @click="deleteProduct(product)">{{ deletingProductId === product.id ? 'Siliniyor…' : 'Sil' }}</button></div>
               </article>
               <div v-if="!visibleProducts.length" class="product-empty">
                 <span>⌕</span><strong>Ürün bulunamadı</strong
@@ -819,13 +932,13 @@ async function deleteDealer(dealer: Dealer) {
               </article>
               <article>
                 <span>Kritik Stok</span
-                ><strong>{{ products.filter((p) => p.stock > 0 && p.stock <= 5).length }}</strong>
+                ><strong>{{ products.filter((p) => p.stock > 0 && p.stock <= 2).length }}</strong>
               </article>
             </div>
             <h3>Stok uyarıları</h3>
             <div
               class="stock-alert"
-              v-for="product in products.filter((p) => p.stock <= 5).slice(0, 20)"
+              v-for="product in products.filter((p) => p.stock <= 2).slice(0, 20)"
               :key="product.id"
             >
               <strong>{{ product.name }}</strong
@@ -930,6 +1043,7 @@ async function deleteDealer(dealer: Dealer) {
         </section>
       </section>
     </template>
+    <footer v-if="!authenticated" class="admin-creator-credit">Created by Raul Babakhanov</footer>
   </main>
 </template>
 
@@ -2918,8 +3032,9 @@ header a {
   }
 }
 .dealer-table > div {
-  grid-template-columns: 1.25fr 0.9fr 1.5fr 0.65fr 1.1fr 0.9fr 70px;
+  grid-template-columns: 1.2fr 0.85fr 1.4fr 0.6fr 1fr 1.05fr 0.85fr 70px;
 }
+.approval-button{min-height:34px;padding:6px 9px;border:1px solid #f1cf86;border-radius:8px;background:#fff8e7;color:#95640b;font-size:10px;font-weight:800;cursor:pointer}.approval-button.approved{border-color:#a9ddbd;background:#eaf8ef;color:#237446}.approval-button:hover{filter:brightness(.96)}
 .discount-editor {
   display: flex !important;
   flex-direction: row !important;
@@ -3208,4 +3323,45 @@ header a {
 .advanced-product-form{padding:24px;background:#f6f8fc}.form-section{margin-bottom:16px;padding:22px;border:1px solid #dde6f1;border-radius:16px;background:#fff}.form-section>header{display:flex;align-items:center;gap:12px;margin-bottom:18px}.form-section>header>span{width:34px;height:34px;display:grid;place-items:center;border-radius:10px;background:#e8f1ff;color:#2362b6;font-weight:900}.form-section>header>div{display:flex;flex-direction:column;gap:3px}.form-section>header strong{font-size:17px}.form-section>header small,.product-basics label>small{color:#8a96a8;font-size:11px}.product-basics>div{display:grid;grid-template-columns:1.5fr 1.2fr .6fr;gap:15px}.product-basics label{display:flex;flex-direction:column;gap:8px;font-size:13px;font-weight:800}.product-basics input{height:50px;padding:0 14px;border:1px solid #ccd8e8;border-radius:10px;background:#f9fbfe;font-size:15px;outline:none}.product-basics input:focus,.price-cards input:focus{border-color:#2d6dc3;box-shadow:0 0 0 3px #2d6dc315}.price-cards{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}.price-cards>label{position:relative;padding:17px;display:grid;grid-template-columns:auto 1fr;align-items:center;gap:5px 10px;border:2px solid #e1e7f0;border-radius:14px;background:#fbfcfe;transition:.18s}.price-cards>label.selected{border-color:#2a68bd;background:#f1f6ff;box-shadow:0 8px 24px #2563b51a}.price-cards label>button{position:absolute;right:10px;top:10px;padding:5px 8px;border:0;border-radius:7px;background:#e9eef5;color:#758196;font-size:10px;font-weight:800;cursor:pointer}.price-cards label.selected>button{background:#2866ba;color:#fff}.price-cards label>span{grid-row:1/3;width:40px;height:40px;display:grid;place-items:center;border-radius:11px;background:#e8eff9;color:#225ca8;font-size:20px;font-weight:900}.price-cards label>strong{padding-right:85px;font-size:14px}.price-cards input{grid-column:1/-1;height:50px;padding:0 13px;border:1px solid #ccd8e8;border-radius:9px;background:#fff;font-size:18px;font-weight:800;outline:none}.price-cards label>small{grid-column:1/-1;color:#8995a7;font-size:10px}.price-warning{margin:13px 0 0;padding:10px 12px;border-radius:8px;background:#fff2df;color:#a66713;font-size:12px;font-weight:700}.image-drop{min-height:100px;padding:14px;display:flex;align-items:center;gap:15px;border:2px dashed #bfd0e5;border-radius:13px;background:#f7faff;cursor:pointer}.image-drop input{display:none}.image-drop>img,.image-drop>span{width:76px;height:76px;display:grid;place-items:center;border-radius:10px;background:#e7effa;object-fit:contain;color:#326bb7;font-size:28px}.image-drop>div{display:flex;flex-direction:column;gap:5px}.image-drop small{color:#8592a5}.product-form-footer{padding:18px 22px;display:flex;align-items:center;justify-content:space-between;border:1px solid #dce5f1;border-radius:15px;background:#fff}.product-form-footer>div{display:grid;grid-template-columns:auto auto;gap:3px 10px}.product-form-footer span,.product-form-footer small{color:#8390a3;font-size:11px}.product-form-footer small{grid-column:1/-1}.product-form-footer button{min-width:270px;height:52px;border:0;border-radius:11px;background:linear-gradient(110deg,#174c99,#2d74ce);color:#fff;font-size:15px;font-weight:900;box-shadow:0 10px 22px #245fac2b;cursor:pointer}.product-form-footer button:disabled{opacity:.5;cursor:not-allowed}@media(max-width:900px){.product-basics>div,.price-cards{grid-template-columns:1fr}.advanced-product-form{padding:12px}.form-section{padding:16px}.product-form-footer{align-items:stretch;flex-direction:column;gap:14px}.product-form-footer button{width:100%;min-width:0}}
 .orders-workspace{display:grid;gap:18px}.orders-hero{padding:27px 30px;display:flex;align-items:center;justify-content:space-between;border-radius:19px;background:linear-gradient(120deg,#0b326d,#2265b5);color:#fff;box-shadow:0 15px 35px #123d7825}.orders-hero>div>span{color:#75b9ff;font-size:11px;font-weight:900;letter-spacing:1.8px}.orders-hero h2{margin:7px 0 5px;font-size:28px}.orders-hero p{margin:0;color:#c6d8ef;font-size:13px}.export-orders{height:44px;padding:0 17px;border:1px solid #ffffff45;border-radius:10px;background:#ffffff12;color:#fff;font-weight:800;cursor:pointer}.export-orders:hover{background:#fff;color:#174e95}.order-metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:13px}.order-metrics article{padding:19px 21px;display:flex;flex-direction:column;border:1px solid #dde5ef;border-radius:15px;background:#fff;box-shadow:0 7px 24px #1737650a}.order-metrics span{color:#778599;font-size:12px}.order-metrics strong{margin:7px 0 3px;color:#12366d;font-size:24px}.order-metrics small{color:#9aa4b3;font-size:10px}.order-metrics .pending{border-color:#f1dfb8;background:#fffaf0}.order-metrics .pending strong{color:#b47616}.orders-toolbar{padding:13px;display:flex;align-items:center;gap:10px;border:1px solid #dde5ef;border-radius:14px;background:#fff}.orders-toolbar>label{height:42px;min-width:310px;padding:0 13px;display:flex;align-items:center;gap:8px;border:1px solid #d5deeb;border-radius:9px;color:#8491a4}.orders-toolbar input{width:100%;border:0;outline:0;background:transparent}.orders-toolbar .filter-pills{margin-left:auto}.orders-refresh{height:40px;padding:0 13px;border:1px solid #d7e1ed;border-radius:9px;background:#f7f9fc;color:#53657d;font-weight:800;cursor:pointer}.advanced-order-list{display:grid;gap:10px}.advanced-order-list>article{border:1px solid #dfe6ef;border-radius:15px;background:#fff;overflow:hidden;transition:.18s}.advanced-order-list>article:hover,.advanced-order-list>article.expanded{border-color:#bcd0e9;box-shadow:0 10px 30px #1539680e}.order-main{min-height:96px;padding:15px 17px;display:grid;grid-template-columns:48px 1.15fr 1.6fr .75fr .75fr auto auto;align-items:center;gap:15px}.order-avatar{width:46px;height:46px;display:grid;place-items:center;border-radius:12px;background:linear-gradient(145deg,#e7f1ff,#d7e8ff);color:#205ca9;font-size:18px;font-weight:900}.order-identity,.order-product-preview,.order-date,.order-amount{min-width:0;display:flex;flex-direction:column;gap:4px}.order-main small{color:#929daf;font-size:9px;font-weight:800;letter-spacing:.7px}.order-main strong{color:#17335e;font-size:13px}.order-identity>span,.order-product-preview>span{overflow:hidden;color:#748197;font-size:11px;text-overflow:ellipsis;white-space:nowrap}.order-main>em{padding:8px 11px;border-radius:16px;background:#fff1d5;color:#a76c12;font-size:10px;font-style:normal;font-weight:900}.order-actions{display:flex;gap:5px}.order-actions button{height:34px;padding:0 10px;border:1px solid #cbdcf1;border-radius:8px;background:#f1f6ff;color:#205ca9;font-size:10px;font-weight:900;cursor:pointer}.order-actions button:hover{background:#205ca9;color:#fff}.order-details{padding:0 80px 18px;background:#f7f9fc;border-top:1px solid #e5eaf1}.order-details>header{padding:15px 0 10px;display:flex;justify-content:space-between;color:#526279;font-size:12px}.order-detail-row{padding:10px 12px;display:grid;grid-template-columns:40px 1fr 130px 130px;gap:10px;border-top:1px solid #e1e7ef;background:#fff}.order-detail-row>span{color:#2864b7;font-weight:900}.order-detail-row>strong{font-size:12px}.order-detail-row>small,.order-detail-row>b{text-align:right;font-size:11px}.order-details>footer{margin-top:10px;padding:12px;border-radius:9px;background:#fff5df;color:#8b651e}.order-details footer span{font-size:10px;font-weight:900}.order-details footer p{margin:5px 0 0;font-size:12px}.order-empty button{margin-top:14px;padding:10px 14px;border:0;border-radius:8px;background:#2562b5;color:#fff;font-weight:800;cursor:pointer}@media(max-width:1100px){.order-metrics{grid-template-columns:repeat(2,1fr)}.order-main{grid-template-columns:48px 1fr 1fr auto}.order-date,.order-amount{display:none}.order-details{padding:0 20px 18px}}@media(max-width:760px){.orders-hero{align-items:flex-start;gap:18px;flex-direction:column}.order-metrics{grid-template-columns:1fr 1fr}.orders-toolbar{align-items:stretch;flex-direction:column}.orders-toolbar>label{min-width:0}.orders-toolbar .filter-pills{margin-left:0;overflow:auto}.order-main{grid-template-columns:42px 1fr auto}.order-product-preview,.order-main>em{display:none}.order-actions{grid-column:1/-1}.order-actions button{flex:1}.order-details{padding:0 10px 15px}.order-detail-row{grid-template-columns:32px 1fr}.order-detail-row>small,.order-detail-row>b{grid-column:2;text-align:left}}
 .advanced-product-form{display:grid;grid-template-columns:minmax(0,2fr) minmax(300px,.8fr);grid-template-areas:"basics media" "price price" "footer footer";gap:16px}.advanced-product-form .form-section{margin:0}.advanced-product-form .product-basics{grid-area:basics}.advanced-product-form .media-section{grid-area:media}.advanced-product-form .price-section{grid-area:price}.advanced-product-form .product-form-footer{grid-area:footer}.advanced-product-form .image-drop{min-height:144px;justify-content:center;flex-direction:column;gap:11px;border-color:#91b5df;background:#f3f8ff;text-align:center;transition:.18s}.advanced-product-form .image-drop:hover{border-color:#2867ba;background:#eaf3ff}.advanced-product-form .image-drop>img,.advanced-product-form .image-drop>span{width:92px;height:92px}@media(max-width:900px){.advanced-product-form{grid-template-columns:1fr;grid-template-areas:"basics" "media" "price" "footer"}}
+.admin-creator-credit{position:fixed;z-index:1200;right:18px;bottom:14px;padding:5px;color:#536985;background:transparent;text-align:right;font-size:11px;font-weight:700;letter-spacing:.2px;text-shadow:0 1px 1px #fff}
+
+/* Sipariş yönetimi: daha ferah kartlar ve okunaklı detay görünümü */
+.orders-workspace{max-width:1480px;margin:0 auto;gap:20px}
+.orders-toolbar{padding:12px 14px;border-color:#d9e3f0;border-radius:16px;box-shadow:0 7px 22px #1638650a}
+.orders-toolbar>label{height:46px;border-color:#d2deed;border-radius:11px;background:#f9fbfe;transition:.2s}
+.orders-toolbar>label:focus-within{border-color:#2d69b9;background:#fff;box-shadow:0 0 0 4px #2b67b714}
+.filter-pills{display:flex;gap:6px;padding:4px;border-radius:11px;background:#f0f4f9}
+.filter-pills button{min-height:37px;padding:0 15px;border:0;border-radius:8px;background:transparent;color:#748198;font-weight:800;cursor:pointer}
+.filter-pills button.active{background:#fff;color:#205ca9;box-shadow:0 3px 10px #153c7114}
+.orders-refresh{height:45px;border-radius:10px;background:#fff;transition:.2s}
+.orders-refresh:hover{border-color:#2b67b8;color:#205ca9;transform:translateY(-1px)}
+.advanced-order-list{gap:14px}
+.advanced-order-list>article{border-color:#dce5f0;border-radius:18px;box-shadow:0 7px 25px #183b6909}
+.advanced-order-list>article:hover{transform:translateY(-1px);box-shadow:0 13px 32px #173b6a10}
+.advanced-order-list>article.expanded{border-color:#a9c5e8;box-shadow:0 14px 35px #1c579d17}
+.order-main{min-height:104px;padding:18px 20px;grid-template-columns:50px minmax(210px,1.2fr) minmax(260px,1.55fr) minmax(140px,.7fr) minmax(120px,.65fr) auto 128px;gap:18px}
+.order-avatar{width:48px;height:48px;border-radius:14px;background:linear-gradient(145deg,#e8f2ff,#d5e7ff);box-shadow:inset 0 0 0 1px #c7ddf8}
+.order-main small{color:#8b98aa;letter-spacing:1px}
+.order-main strong{font-size:13px;line-height:1.35}
+.order-identity>strong{color:#12549d;font-size:14px}
+.order-amount>strong{color:#123b72;font-size:15px}
+.order-main>em{white-space:nowrap;border:1px solid #f2dba8;background:#fff7e7}
+.order-actions{justify-content:flex-end}
+.order-actions button{height:38px;padding:0 12px;border-radius:9px;background:#f5f9ff;transition:.18s}
+.order-details{margin:0 18px 18px;padding:16px 18px 18px;border:1px solid #dfe8f3;border-radius:14px;background:#f6f9fd}
+.order-details>header{height:auto;min-height:0;padding:0 2px 13px;border:0;border-bottom:1px solid #dce5f0;background:transparent;color:#627188}
+.order-details>header strong{color:#173b6c;font-size:13px}
+.order-details>header span{padding:5px 9px;border-radius:20px;background:#e5eef9;color:#4d6687;font-size:10px;font-weight:800}
+.order-detail-row{min-height:54px;margin-top:8px;padding:11px 14px;align-items:center;border:1px solid #e0e7f0;border-radius:10px;background:#fff;box-shadow:0 3px 12px #183b6908}
+.order-detail-row>span{width:34px;height:30px;display:grid;place-items:center;border-radius:8px;background:#e9f2ff}
+.order-detail-row>strong{color:#203b62}
+.order-detail-row>b{color:#163f77;font-size:12px}
+.order-details>footer{border:1px solid #f0deb9}
+@media(max-width:1200px){.order-main{grid-template-columns:48px 1.1fr 1.35fr .75fr auto}.order-amount{display:flex}.order-main>em{display:none}.order-actions{grid-column:auto}}
+@media(max-width:760px){.order-details{margin:0 8px 10px;padding:12px}.order-main{grid-template-columns:42px 1fr auto}.order-amount{display:none}.order-actions{grid-column:1/-1}.filter-pills{overflow:auto}.filter-pills button{white-space:nowrap}}
+.product-row-actions{display:flex;align-items:center;gap:7px}.product-row-actions button{height:44px;padding:0 15px;border:0;border-radius:9px;font-size:11px;font-weight:900;cursor:pointer}.product-row-actions button:first-child{background:#2867ba;color:#fff}.product-row-actions .delete-product{border:1px solid #efc4ca;background:#fff1f2;color:#b72d40}.product-row-actions .delete-product:hover{background:#c83a4c;color:#fff}.product-row-actions button:disabled{opacity:.55;cursor:wait}
+.order-status-control{min-width:128px;display:flex;flex-direction:column;gap:4px}.order-status-control>small{font-size:8px!important}.order-status-control select{height:36px;padding:0 27px 0 10px;border:1px solid;border-radius:9px;font-size:10px;font-weight:900;outline:0;cursor:pointer}.order-status-control.approved select{border-color:#b9d2f2;background:#edf5ff;color:#245f9f}.order-status-control.preparing select{border-color:#efd391;background:#fff7e6;color:#a36b0c}.order-status-control.shipping select{border-color:#a9d9ec;background:#edfaff;color:#167392}.order-status-control.completed select{border-color:#a9ddbd;background:#ecf9f1;color:#247448}.order-status-control.cancelled select{border-color:#efb9c1;background:#fff0f2;color:#b12f42}.order-status-control select:disabled{opacity:.6;cursor:wait}.filter-pills{max-width:720px;overflow-x:auto;scrollbar-width:thin}.filter-pills button{white-space:nowrap}
+@media(max-width:1200px){.order-status-control{display:none}}
+.order-details>footer{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;background:transparent;border:0;padding:0}.order-details>footer>div{padding:13px;border:1px solid #e5d6b8;border-radius:10px;background:#fff8e9}.order-details>footer span{color:#8b651e;letter-spacing:.7px}.order-details>footer p{color:#56657a;line-height:1.5}.dealer-address-field{grid-column:1/-1}.dealer-form textarea{min-height:82px;padding:11px 12px;border:1px solid #ccd8e8;border-radius:9px;background:#f9fbfe;font:inherit;resize:vertical}.dealer-form textarea:focus{border-color:#2b67b8;outline:0;box-shadow:0 0 0 3px #2b67b815}@media(max-width:700px){.order-details>footer{grid-template-columns:1fr}}
+.shipping-editor{margin:12px 0;padding:14px;display:grid;grid-template-columns:minmax(210px,1.3fr) 1fr 1fr auto;align-items:end;gap:12px;border:1px solid #c9dcf1;border-radius:12px;background:linear-gradient(120deg,#edf5ff,#f8fbff)}.shipping-editor>div{display:flex;align-items:center;gap:10px}.shipping-editor>div>span{width:38px;height:38px;display:grid;place-items:center;border-radius:10px;background:#dcecff;font-size:19px}.shipping-editor p,.shipping-editor label{display:flex;flex-direction:column;gap:4px;margin:0}.shipping-editor p strong{color:#174b89;font-size:12px}.shipping-editor p small,.shipping-editor label{color:#73849a;font-size:9px}.shipping-editor input{height:40px;padding:0 11px;border:1px solid #bfd1e7;border-radius:9px;background:#fff;color:#203b62;outline:0}.shipping-editor input:focus{border-color:#2a67b8;box-shadow:0 0 0 3px #2a67b812}.shipping-editor>button{height:40px;padding:0 15px;border:0;border-radius:9px;background:#2865b5;color:#fff;font-size:10px;font-weight:900;cursor:pointer}.shipping-editor>button:disabled{opacity:.55;cursor:wait}@media(max-width:1000px){.shipping-editor{grid-template-columns:1fr 1fr}.shipping-editor>div{grid-column:1/-1}}@media(max-width:650px){.shipping-editor{grid-template-columns:1fr}.shipping-editor>div{grid-column:auto}}
 </style>

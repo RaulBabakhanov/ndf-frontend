@@ -1,12 +1,34 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import ndfLogo from './assets/ndf-logo.png'
 import heroBg from './assets/hero-bg.jpg'
-import { products, type CatalogProduct } from './data/products'
-import { api, ApiError, type AuthDto, type OrderDto } from './services/api'
+import { products as staticProducts, type CatalogProduct } from './data/products'
+import { api, ApiError, resolveApiAssetUrl, type AuthDto, type OrderDto, type ProductDto } from './services/api'
 import AdminPanel from './components/AdminPanel.vue'
+import TurnstileWidget from './components/TurnstileWidget.vue'
 
 type View = 'home' | 'register' | 'login' | 'account'
+
+function cleanText(value: string) {
+  let result = value
+  const replacements: Record<string, string> = {
+    'Ã‡': 'Ç', 'Ã§': 'ç', 'Ä°': 'İ', 'Ä±': 'ı', 'Ã–': 'Ö', 'Ã¶': 'ö',
+    'Ãœ': 'Ü', 'Ã¼': 'ü', 'Äž': 'Ğ', 'ÄŸ': 'ğ', 'Åž': 'Ş', 'ÅŸ': 'ş',
+    'Â°': '°', 'Â·': '·', 'â€“': '–', 'â€”': '—', 'â€™': '’', 'â€œ': '“', 'â€': '”',
+  }
+  for (let pass = 0; pass < 3; pass++) {
+    const previous = result
+    for (const [broken, correct] of Object.entries(replacements)) result = result.replaceAll(broken, correct)
+    if (result === previous) break
+  }
+  result = result
+    .replace(/\S*ANZIMANLI/giu, 'ŞANZIMANLI')
+    .replace(/\bSANZIMANLI\b/giu, 'ŞANZIMANLI')
+    .replace(/\bKAYISLI\b/giu, 'KAYIŞLI')
+    .replace(/\bCAPA\b/giu, 'ÇAPA')
+    .replace(/\bMAKINASI\b/giu, 'MAKİNASI')
+  return result
+}
 
 interface Dealer {
   id?: number
@@ -14,6 +36,7 @@ interface Dealer {
   official: string
   taxNumber: string
   city: string
+  address: string
   phone: string
   email: string
   password: string
@@ -24,31 +47,42 @@ interface Order {
   date: string
   itemCount: number
   total: number
-  status: 'Hazırlanıyor'
+  status: string
   note: string
+  shippingCompany: string
+  trackingNumber: string
 }
 
-const view = ref<View>('home')
 const isAdminPage = window.location.pathname.replace(/\/$/, '') === '/admin'
 const notice = ref('')
 const storedSession = localStorage.getItem('ndfDealerSession')
 const currentDealer = ref<Dealer | null>(storedSession ? JSON.parse(storedSession) : null)
+const view = ref<View>(storedSession && localStorage.getItem('ndfAccessToken') ? 'account' : 'home')
 
 const registerForm = reactive<Dealer>({
-  company: '', official: '', taxNumber: '', city: '', phone: '', email: '', password: '', discountPercent: 0,
+  company: '', official: '', taxNumber: '', city: '', address: '', phone: '', email: '', password: '', discountPercent: 0,
 })
 const passwordAgain = ref('')
 const termsAccepted = ref(false)
 const loginForm = reactive({ email: '', password: '', remember: false })
+const turnstileSiteKey = import.meta.env.VITE_TURNSTILE_SITE_KEY || ''
+const registerTurnstileToken = ref('')
+const loginTurnstileToken = ref('')
+const registerCaptcha = ref<InstanceType<typeof TurnstileWidget> | null>(null)
+const loginCaptcha = ref<InstanceType<typeof TurnstileWidget> | null>(null)
 const search = ref('')
 const selectedCategory = ref('Tümü')
-const cart = reactive<Record<number, number>>({})
-const activeTab = ref<'products' | 'orders' | 'payments' | 'profile' | 'online-payment'>('products')
+const storedCart = localStorage.getItem('ndfCart')
+const cart = reactive<Record<number, number>>(storedCart ? JSON.parse(storedCart) : {})
+type AccountTab = 'products' | 'orders' | 'payments' | 'profile' | 'online-payment'
+const storedTab = localStorage.getItem('ndfActiveTab') as AccountTab | null
+const activeTab = ref<AccountTab>(storedTab || 'products')
 const paymentNotice = ref('')
 const paymentAmount = ref<number | null>(null)
 const paymentCurrency = ref<'TRY' | 'USD'>('TRY')
 const cardForm = reactive({ holder: '', number: '', expiry: '', cvc: '', installment: 'Tek çekim' })
 const orderNote = ref('')
+const deliveryAddress = ref('')
 const orders = ref<Order[]>([])
 const currentPage = ref(1)
 const pageSize = 24
@@ -58,7 +92,14 @@ const catalogCurrency = ref<'TRY' | 'USD' | 'EUR'>('TRY')
 const sortOrder = ref<'recommended' | 'price-asc' | 'price-desc'>('recommended')
 const selectedProduct = ref<CatalogProduct | null>(null)
 const detailQuantity = ref(1)
-const categories = ['Tümü', ...new Set(products.map((product) => product.category))]
+watch(cart, (value) => localStorage.setItem('ndfCart', JSON.stringify(value)), { deep: true })
+watch(activeTab, (value) => localStorage.setItem('ndfActiveTab', value))
+const products = reactive<CatalogProduct[]>(staticProducts.map((product) => ({
+  ...product,
+  name: cleanText(product.name),
+  category: cleanText(product.category),
+})))
+const categories = computed(() => ['Tümü', ...new Set(products.map((product) => product.category))])
 const filteredProducts = computed(() => products.filter((product) =>
   (selectedCategory.value === 'Tümü' || product.category === selectedCategory.value)
   && product.name.toLocaleLowerCase('tr').includes(search.value.toLocaleLowerCase('tr')),
@@ -77,6 +118,30 @@ const cartTotal = computed(() => products.reduce((sum, product) => sum + discoun
 const money = (value: number) => new Intl.NumberFormat('tr-TR', { style: 'currency', currency: 'TRY', maximumFractionDigits: 2 }).format(value)
 const dollar = (value: number) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value)
 const euro = (value: number) => new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' }).format(value)
+function apiProductPriceUsd(product: ProductDto) {
+  if (product.default_currency === 'TRY' && product.price_try !== null) return Number(product.price_try) / usdToTry
+  if (product.default_currency === 'EUR' && product.price_eur !== null) return Number(product.price_eur) * eurToTry / usdToTry
+  return Number(product.price_usd)
+}
+async function loadProducts() {
+  const loaded: ProductDto[] = []
+  let page = 1
+  do {
+    const response = await api.products(page, 100)
+    loaded.push(...response.items)
+    if (loaded.length >= response.total) break
+    page++
+  } while (true)
+  products.splice(0, products.length, ...loaded.map((product) => ({
+    id: product.id,
+    name: cleanText(product.name),
+    category: cleanText(product.category),
+    price: apiProductPriceUsd(product),
+    stock: product.stock,
+    image: resolveApiAssetUrl(product.image_url),
+    url: product.external_url,
+  })))
+}
 const productPrice = (usdPrice: number) => {
   const discountedUsd = discountedPrice(usdPrice)
   if (catalogCurrency.value === 'TRY') return money(discountedUsd * usdToTry)
@@ -89,16 +154,30 @@ const alternatePrice = (usdPrice: number) => catalogCurrency.value === 'TRY'
 function clearCart() {
   Object.keys(cart).forEach((id) => delete cart[Number(id)])
 }
-function addToCart(id: number) {
-  cart[id] = (cart[id] || 0) + 1
+function removeFromCart(id: number) {
+  delete cart[id]
+}
+function changeCartQuantity(id: number, change: number) {
+  const product = products.find((item) => item.id === id)
+  if (!product) return
+  const nextQuantity = Math.min(product.stock, Math.max(0, (cart[id] || 0) + change))
+  if (nextQuantity === 0) delete cart[id]
+  else cart[id] = nextQuantity
 }
 function openProduct(product: CatalogProduct) {
   selectedProduct.value = product
-  detailQuantity.value = 1
+  detailQuantity.value = cart[product.id] || 1
 }
 function addSelectedProduct() {
   if (!selectedProduct.value) return
-  cart[selectedProduct.value.id] = (cart[selectedProduct.value.id] || 0) + detailQuantity.value
+  const product = selectedProduct.value
+  if (detailQuantity.value <= 0) delete cart[product.id]
+  else cart[product.id] = Math.min(detailQuantity.value, product.stock)
+  selectedProduct.value = null
+}
+function removeSelectedProduct() {
+  if (!selectedProduct.value) return
+  delete cart[selectedProduct.value.id]
   selectedProduct.value = null
 }
 function formatExpiry(event: Event) {
@@ -112,21 +191,46 @@ function formatCardNumber(event: Event) {
   cardForm.number = digits.replace(/(.{4})/g, '$1 ').trim()
 }
 function applyAuth(auth: AuthDto) {
-  const dealer: Dealer = { id: auth.dealer.id, company: auth.dealer.company, official: auth.dealer.official, taxNumber: auth.dealer.tax_number, city: auth.dealer.city, phone: auth.dealer.phone, email: auth.dealer.email, password: '', discountPercent: Number(auth.dealer.discount_percent || 0) }
+  const dealer: Dealer = { id: auth.dealer.id, company: auth.dealer.company, official: auth.dealer.official, taxNumber: auth.dealer.tax_number, city: auth.dealer.city, address: auth.dealer.address || '', phone: auth.dealer.phone, email: auth.dealer.email, password: '', discountPercent: Number(auth.dealer.discount_percent || 0) }
   currentDealer.value = dealer
+  deliveryAddress.value = dealer.address
   localStorage.setItem('ndfAccessToken', auth.access_token)
   localStorage.setItem('ndfDealerSession', JSON.stringify(dealer))
 }
 onMounted(async () => {
+  if (!isAdminPage) {
+    try { await loadProducts() } catch { /* Backend ulaşılamazsa sabit katalog gösterilir. */ }
+  }
   if (!localStorage.getItem('ndfAccessToken') || !currentDealer.value) return
   try {
     const dealer = await api.me()
     currentDealer.value.discountPercent = Number(dealer.discount_percent || 0)
+    currentDealer.value.address = dealer.address || ''
+    deliveryAddress.value = currentDealer.value.address
     localStorage.setItem('ndfDealerSession', JSON.stringify(currentDealer.value))
-  } catch { /* Oturum denetimi diğer korumalı işlemlerde yapılır. */ }
+    await openTab(activeTab.value)
+  } catch {
+    currentDealer.value = null
+    view.value = 'home'
+    localStorage.removeItem('ndfDealerSession')
+    localStorage.removeItem('ndfAccessToken')
+  }
 })
 function mapOrder(order: OrderDto): Order {
-  return { id: order.order_number, date: new Intl.DateTimeFormat('tr-TR', { dateStyle: 'long' }).format(new Date(order.created_at)), itemCount: order.items.reduce((sum, item) => sum + item.quantity, 0), total: Number(order.total_try), status: 'Hazırlanıyor', note: order.note }
+  return { id: order.order_number, date: new Intl.DateTimeFormat('tr-TR', { dateStyle: 'long' }).format(new Date(order.created_at)), itemCount: order.items.reduce((sum, item) => sum + item.quantity, 0), total: Number(order.total_try), status: order.status, note: order.note, shippingCompany: order.shipping_company, trackingNumber: order.tracking_number }
+}
+function trackingUrl(order: Order) {
+  const number = encodeURIComponent(order.trackingNumber)
+  const company = order.shippingCompany.toLocaleLowerCase('tr')
+  if (company.includes('yurtiçi')) return `https://www.yurticikargo.com/tr/online-servisler/gonderi-sorgula?code=${number}`
+  if (company.includes('aras')) return 'https://kargotakip.araskargo.com.tr/'
+  if (company.includes('mng')) return 'https://www.mngkargo.com.tr/gonderitakip'
+  if (company.includes('sürat')) return 'https://www.suratkargo.com.tr/KargoTakip/'
+  if (company.includes('ptt')) return 'https://gonderitakip.ptt.gov.tr/'
+  return `https://www.google.com/search?q=${encodeURIComponent(`${order.shippingCompany} ${order.trackingNumber} kargo takip`)}`
+}
+async function copyTracking(number: string) {
+  await navigator.clipboard.writeText(number)
 }
 async function openTab(tab: typeof activeTab.value) {
   activeTab.value = tab
@@ -137,8 +241,9 @@ async function openTab(tab: typeof activeTab.value) {
 }
 async function pay() {
   if (!cartCount.value) return void (paymentNotice.value = 'Ödeme yapabilmek için önce sepetinize ürün ekleyin.')
+  if (deliveryAddress.value.trim().length < 10) return void (paymentNotice.value = 'Lütfen teslimat için açık adresinizi girin.')
   try {
-    const created = await api.createOrder(Object.entries(cart).filter(([, quantity]) => quantity > 0).map(([id, quantity]) => ({ product_id: Number(id), quantity })), orderNote.value)
+    const created = await api.createOrder(Object.entries(cart).filter(([, quantity]) => quantity > 0).map(([id, quantity]) => ({ product_id: Number(id), quantity })), orderNote.value, deliveryAddress.value.trim())
     orders.value.unshift(mapOrder(created))
     clearCart()
     orderNote.value = ''
@@ -175,24 +280,29 @@ async function register() {
   if (registerForm.password.length < 8) return void (notice.value = 'Şifreniz en az 8 karakter olmalıdır.')
   if (registerForm.password !== passwordAgain.value) return void (notice.value = 'Şifreler birbiriyle eşleşmiyor.')
   if (!termsAccepted.value) return void (notice.value = 'Devam etmek için kullanım koşullarını kabul edin.')
+  if (!registerTurnstileToken.value) return void (notice.value = 'Lütfen bot olmadığınızı doğrulayın.')
 
   try {
-    const auth = await api.register({ company: registerForm.company, official: registerForm.official, tax_number: registerForm.taxNumber, city: registerForm.city, phone: registerForm.phone, email: registerForm.email, password: registerForm.password })
-    applyAuth(auth)
-    notice.value = ''
-    view.value = 'account'
+    const registration = await api.register({ company: registerForm.company, official: registerForm.official, tax_number: registerForm.taxNumber, city: registerForm.city, phone: registerForm.phone, email: registerForm.email, password: registerForm.password, turnstile_token: registerTurnstileToken.value, website: '' })
+    loginForm.email = registerForm.email
+    notice.value = registration.message
+    view.value = 'login'
   } catch (error) {
     notice.value = error instanceof ApiError ? error.message : 'Backend bağlantısı kurulamadı.'
+    registerCaptcha.value?.reset()
   }
 }
 
 async function login() {
+  notice.value = ''
+  if (!loginTurnstileToken.value) return void (notice.value = 'Lütfen bot olmadığınızı doğrulayın.')
   try {
-    applyAuth(await api.login(loginForm.email, loginForm.password))
+    applyAuth(await api.login(loginForm.email, loginForm.password, loginTurnstileToken.value))
     notice.value = ''
     view.value = 'account'
   } catch (error) {
     notice.value = error instanceof ApiError ? error.message : 'Backend bağlantısı kurulamadı.'
+    loginCaptcha.value?.reset()
   }
 }
 
@@ -246,16 +356,18 @@ function logout() {
           <label>Şifre<input v-model="registerForm.password" required type="password" minlength="8" placeholder="En az 8 karakter" /></label>
           <label>Şifre tekrar<input v-model="passwordAgain" required type="password" placeholder="Şifrenizi tekrar girin" /></label>
           <label class="check full"><input v-model="termsAccepted" type="checkbox" /> Bilgilerimin bayi başvurusu için işlenmesini kabul ediyorum.</label>
+          <TurnstileWidget ref="registerCaptcha" class="full" :site-key="turnstileSiteKey" @verified="registerTurnstileToken = $event" />
           <p v-if="notice" class="notice error full">{{ notice }}</p>
           <button class="submit full" type="submit">BAYİ KAYDI OLUŞTUR <span>→</span></button>
           <p class="switch full">Zaten hesabınız var mı? <button type="button" @click="openView('login')">Giriş yapın</button></p>
         </form>
 
         <form v-else-if="view === 'login'" class="login-form" @submit.prevent="login">
-          <p v-if="notice" :class="['notice', notice.includes('başarıyla') ? 'success' : 'error']">{{ notice }}</p>
+          <p v-if="notice" :class="['notice', notice.includes('Başvurunuz alındı') ? 'success' : 'error']">{{ notice }}</p>
           <label>E-posta<input v-model.trim="loginForm.email" required type="email" placeholder="ornek@firma.com" /></label>
           <label>Şifre<input v-model="loginForm.password" required type="password" placeholder="Şifreniz" /></label>
           <label class="check"><input v-model="loginForm.remember" type="checkbox" /> Beni hatırla</label>
+          <TurnstileWidget ref="loginCaptcha" :site-key="turnstileSiteKey" @verified="loginTurnstileToken = $event" />
           <button class="submit" type="submit">GİRİŞ YAP <span>→</span></button>
           <p class="switch">Bayi hesabınız yok mu? <button type="button" @click="openView('register')">Kayıt oluşturun</button></p>
         </form>
@@ -287,7 +399,7 @@ function logout() {
             <div class="product-grid">
               <article v-for="product in pagedProducts" :key="product.id" class="product-card">
                 <button class="product-image" type="button" @click="openProduct(product)" :aria-label="`${product.name} detayını aç`" :style="{ backgroundImage: product.image ? `url(${product.image})` : `url(${heroBg})` }"><span>Stokta</span></button>
-                <div class="product-info"><small>{{ product.category }}</small><h3 class="product-name" @click="openProduct(product)">{{ product.name }}</h3><div class="price">{{ productPrice(product.price) }}</div><div class="alternate-price">≈ {{ alternatePrice(product.price) }}</div><button class="add-cart" @click="addToCart(product.id)">＋ SEPETE EKLE</button></div>
+                <div class="product-info"><small>{{ product.category }}</small><h3 class="product-name" @click="openProduct(product)">{{ product.name }}</h3><div class="price">{{ productPrice(product.price) }}</div><div class="alternate-price">≈ {{ alternatePrice(product.price) }}</div><button class="add-cart" :disabled="product.stock <= 0" @click="openProduct(product)">{{ product.stock <= 0 ? 'STOKTA YOK' : cart[product.id] ? 'SEPETTE · DÜZENLE' : '＋ SEPETE EKLE' }}</button></div>
               </article>
             </div>
             <div v-if="!filteredProducts.length" class="empty-products">Aramanızla eşleşen ürün bulunamadı.</div>
@@ -305,7 +417,7 @@ function logout() {
           </div>
           <div v-if="orders.length" class="orders-table">
             <div class="table-head"><span>Sipariş No</span><span>Tarih</span><span>Ürün</span><span>Tutar</span><span>Durum</span><span></span></div>
-            <div v-for="order in orders" :key="order.id"><strong>#{{ order.id }}</strong><span>{{ order.date }}</span><span>{{ order.itemCount }} ürün</span><strong>{{ money(order.total) }}</strong><em class="status preparing">{{ order.status }}</em><button>Detay →</button></div>
+            <div v-for="order in orders" :key="order.id"><strong>#{{ order.id }}</strong><span>{{ order.date }}</span><span>{{ order.itemCount }} ürün</span><strong>{{ money(order.total) }}</strong><div class="order-shipping-state"><em :class="['status', order.status === 'Kargoda' ? 'shipping' : order.status === 'Tamamlandı' ? 'done' : 'preparing']">{{ order.status }}</em><small v-if="order.trackingNumber">{{ order.shippingCompany }} · {{ order.trackingNumber }}</small></div><div v-if="order.trackingNumber" class="tracking-actions"><button type="button" @click="copyTracking(order.trackingNumber)">Kopyala</button><a :href="trackingUrl(order)" target="_blank" rel="noopener">Takip et →</a></div><button v-else>Detay →</button></div>
           </div>
           <div v-if="!orders.length && !cartCount" class="empty-orders">
             <div class="empty-orb"><span>▤</span><i></i><i></i></div>
@@ -325,16 +437,17 @@ function logout() {
               <label>Kart numarası<input :value="cardForm.number" required maxlength="19" inputmode="numeric" autocomplete="cc-number" pattern="\d{4} \d{4} \d{4} \d{4}" placeholder="0000 0000 0000 0000" @input="formatCardNumber" /></label>
               <div class="card-row"><label>Son kullanma<input :value="cardForm.expiry" required maxlength="5" inputmode="numeric" pattern="(0[1-9]|1[0-2])/\d{2}" title="AA/YY formatında geçerli bir tarih girin" placeholder="AA/YY" @input="formatExpiry" /></label><label>CVC<input v-model="cardForm.cvc" required maxlength="3" type="password" inputmode="numeric" placeholder="•••" /></label></div>
               <label>Taksit seçeneği<select v-model="cardForm.installment"><option>Tek çekim</option><option>2 taksit</option><option>3 taksit</option><option>6 taksit</option></select></label>
+              <label class="delivery-address">Teslimat adresi<textarea v-model.trim="deliveryAddress" required minlength="10" maxlength="500" placeholder="Siparişin teslim edileceği açık adres"></textarea><small>Kayıtlı adresiniz otomatik gelir; bu sipariş için değiştirebilirsiniz.</small></label>
               <p v-if="paymentNotice" :class="['notice', paymentNotice.includes('başarıyla') ? 'success' : 'error']">{{ paymentNotice }}</p>
               <button class="pay-button" type="submit">🔒 {{ money(cartTotal) }} GÜVENLE ÖDE</button>
             </form>
-            <aside class="payment-summary"><div class="summary-heading"><h3>Sipariş Özeti</h3><span v-if="cartCount">{{ cartCount }} ürün</span></div><div v-if="cartCount" class="summary-products"><div v-for="product in products.filter(p => cart[p.id])" :key="product.id"><span>{{ cart[product.id] }}×</span><p><strong>{{ product.name }}</strong><small>{{ money(discountedPrice(product.price) * usdToTry) }}</small></p></div></div><div v-else class="empty-cart">🛒<strong>Sepetiniz boş</strong><button @click="openTab('products')">Ürünlere göz at</button></div><dl><div><dt>Ara toplam</dt><dd>{{ money(cartTotal) }}</dd></div><div><dt>KDV</dt><dd>Fiyata dahil</dd></div><div class="summary-total"><dt>Toplam</dt><dd>{{ money(cartTotal) }}</dd></div></dl><p class="payment-note">🔐 Kart bilgileriniz sistemimizde saklanmaz.</p></aside>
+            <aside class="payment-summary"><div class="summary-heading"><h3>Sipariş Özeti</h3><span v-if="cartCount">{{ cartCount }} ürün</span></div><div v-if="cartCount" class="summary-products"><div v-for="product in products.filter(p => cart[p.id])" :key="product.id" class="summary-product-row"><p><strong>{{ product.name }}</strong><small>Birim: {{ money(discountedPrice(product.price) * usdToTry) }}</small><b>{{ money(discountedPrice(product.price) * usdToTry * (cart[product.id] || 0)) }}</b></p><div class="summary-quantity"><button type="button" aria-label="Bir adet azalt" @click="changeCartQuantity(product.id, -1)">−</button><strong>{{ cart[product.id] }}</strong><button type="button" aria-label="Bir adet artır" :disabled="(cart[product.id] || 0) >= product.stock" @click="changeCartQuantity(product.id, 1)">＋</button></div><button class="remove-cart-item" type="button" :aria-label="`${product.name} ürününü tamamen sil`" @click="removeFromCart(product.id)">Sil</button></div></div><div v-else class="empty-cart">🛒<strong>Sepetiniz boş</strong><button @click="openTab('products')">Ürünlere göz at</button></div><dl><div><dt>Ara toplam</dt><dd>{{ money(cartTotal) }}</dd></div><div><dt>KDV</dt><dd>Fiyata dahil</dd></div><div class="summary-total"><dt>Toplam</dt><dd>{{ money(cartTotal) }}</dd></div></dl><p class="payment-note">🔐 Kart bilgileriniz sistemimizde saklanmaz.</p></aside>
           </div>
         </section>
 
         <section v-else-if="activeTab === 'profile'" class="portal-page">
           <div class="page-title"><div><span>BAYİ HESABI</span><h2>Firma Profili</h2><p>Firma ve iletişim bilgilerinizi görüntüleyin.</p></div><button>Bilgileri düzenle</button></div>
-          <div class="profile-layout"><div class="profile-company"><span>{{ currentDealer.company.charAt(0).toUpperCase() }}</span><h3>{{ currentDealer.company }}</h3><p>Onaylı NDF Bayisi</p><em>✓ Aktif hesap</em></div><div class="profile-details"><h3>Firma Bilgileri</h3><dl><div><dt>Firma unvanı</dt><dd>{{ currentDealer.company }}</dd></div><div><dt>Yetkili kişi</dt><dd>{{ currentDealer.official }}</dd></div><div><dt>E-posta</dt><dd>{{ currentDealer.email }}</dd></div><div><dt>Telefon</dt><dd>{{ currentDealer.phone }}</dd></div><div><dt>Şehir</dt><dd>{{ currentDealer.city }}</dd></div><div><dt>Vergi numarası</dt><dd>{{ currentDealer.taxNumber }}</dd></div></dl></div></div>
+          <div class="profile-layout"><div class="profile-company"><span>{{ currentDealer.company.charAt(0).toUpperCase() }}</span><h3>{{ currentDealer.company }}</h3><p>Onaylı NDF Bayisi</p><em>✓ Aktif hesap</em></div><div class="profile-details"><h3>Firma Bilgileri</h3><dl><div><dt>Firma unvanı</dt><dd>{{ currentDealer.company }}</dd></div><div><dt>Yetkili kişi</dt><dd>{{ currentDealer.official }}</dd></div><div><dt>E-posta</dt><dd>{{ currentDealer.email }}</dd></div><div><dt>Telefon</dt><dd>{{ currentDealer.phone }}</dd></div><div><dt>Şehir</dt><dd>{{ currentDealer.city }}</dd></div><div><dt>Vergi numarası</dt><dd>{{ currentDealer.taxNumber }}</dd></div><div class="profile-address"><dt>Açık adres</dt><dd>{{ currentDealer.address || 'Henüz adres girilmedi' }}</dd></div></dl></div></div>
         </section>
 
         <section v-else class="portal-page online-payment-page">
@@ -352,7 +465,9 @@ function logout() {
       </section>
     </section>
 
-    <section v-if="view !== 'account'" class="contact"><h2>İLETİŞİM</h2><div class="contact-info"><div><strong>Adres</strong><p>Altınova Mh. Sulu Sk. No:16<br />Osmangazi / BURSA</p></div><div><strong>Telefon</strong><p>+90 (224) 216 15 14<br />Fax: +90 (224) 216 14 16</p></div><div><strong>E-Mail</strong><p><a href="mailto:ndfmakina@hotmail.com">ndfmakina@hotmail.com</a></p></div></div></section>
+    <button v-if="view === 'account' && currentDealer && activeTab === 'products'" class="floating-cart" type="button" aria-label="Sepeti aç" @click="openTab('payments')"><span class="floating-cart-logo"><img :src="ndfLogo" alt="" /><b>{{ cartCount }}</b></span><span class="floating-cart-copy"><small>SEPETİM</small><strong>{{ money(cartTotal) }}</strong><em>{{ cartCount ? `${cartCount} ürün` : 'Sepet boş' }}</em></span><span class="floating-cart-arrow">→</span></button>
+    <section v-if="view !== 'account'" class="contact"><h2>İLETİŞİM</h2><div class="contact-info"><div><strong>Adres</strong><p>Altınova Mh. Sulu Sk. No:16<br />Osmangazi / BURSA</p></div><div><strong>Telefon</strong><p>+90 (224) 216 15 14<br />Fax: +90 (224) 216 14 16</p></div><div><strong>E-Mail</strong><p><a href="mailto:ndfmakina@hotmail.com">ndfmakina@hotmail.com</a></p></div></div><div class="contact-map"><iframe src="https://www.google.com/maps?q=Alt%C4%B1nova%20Mahallesi%20Sulu%20Sokak%20No%3A16%20Osmangazi%20Bursa&output=embed" title="NDF Makina konumu" loading="lazy" referrerpolicy="no-referrer-when-downgrade" allowfullscreen></iframe></div></section>
+    <footer v-if="view !== 'account'" class="creator-credit">Created by Raul Babakhanov</footer>
     <div v-if="selectedProduct" class="product-modal" @click.self="selectedProduct = null">
       <section class="product-detail" role="dialog" aria-modal="true" :aria-label="selectedProduct.name">
         <button class="detail-close" type="button" aria-label="Kapat" @click="selectedProduct = null">×</button>
@@ -360,8 +475,8 @@ function logout() {
         <div class="detail-content">
           <small>ÜRÜN DETAYI</small><h2>{{ selectedProduct.name }}</h2>
           <div class="detail-price">{{ productPrice(selectedProduct.price) }}</div><div class="alternate-price">≈ {{ alternatePrice(selectedProduct.price) }}</div>
-          <div class="detail-stock">✓ Stokta</div>
-          <div class="detail-actions"><div class="quantity"><button @click="detailQuantity = Math.max(1, detailQuantity - 1)">−</button><span>{{ detailQuantity }}</span><button @click="detailQuantity++">＋</button></div><button class="detail-cart" @click="addSelectedProduct">SEPETE EKLE</button></div>
+          <div class="detail-stock">{{ selectedProduct.stock > 0 ? `✓ Stokta ${selectedProduct.stock} adet` : 'Stokta yok' }}</div>
+          <div class="detail-actions"><div class="quantity"><button :disabled="detailQuantity <= 0" @click="detailQuantity = Math.max(0, detailQuantity - 1)">−</button><span>{{ detailQuantity }}</span><button :disabled="detailQuantity >= selectedProduct.stock" @click="detailQuantity = Math.min(selectedProduct.stock, detailQuantity + 1)">＋</button></div><button class="detail-cart" :disabled="selectedProduct.stock <= 0" @click="addSelectedProduct">{{ cart[selectedProduct.id] ? 'SEPETİ GÜNCELLE' : 'SEPETE EKLE' }}</button></div><button v-if="cart[selectedProduct.id]" class="detail-remove" type="button" @click="removeSelectedProduct">Sepetten sil</button>
           <p><strong>Kategori:</strong> {{ selectedProduct.category }}</p>
         </div>
       </section>
@@ -422,4 +537,12 @@ function logout() {
 .detail-content{display:flex;flex-direction:column;justify-content:center;padding:52px}.detail-content>small{color:#20a5df;font-size:10px;font-weight:800;letter-spacing:1.5px}.detail-content h2{margin:10px 40px 18px 0;color:#162c52;font-size:30px;line-height:1.2}.detail-price{color:#102d67;font-size:28px;font-weight:800}.detail-content .alternate-price{margin:5px 0 18px}.detail-stock{width:max-content;padding:7px 10px;border-radius:7px;background:#e8f7ee;color:#237a46;font-size:11px;font-weight:800}.detail-actions{display:flex;gap:14px;margin:25px 0}.quantity{display:flex;border:1px solid #d7dde7;border-radius:8px;overflow:hidden}.quantity button,.quantity span{width:42px;height:44px;display:grid;place-items:center;border:0;background:#f3f5f8}.quantity span{background:#fff;font-weight:700}.quantity button{cursor:pointer;font-size:17px}.detail-cart{flex:1;border:0;border-radius:8px;background:#2859af;color:#fff;font-weight:800;cursor:pointer}.detail-content p{padding-top:18px;border-top:1px solid #e3e7ed;color:#667187;font-size:12px;line-height:1.5}
 @media(max-width:700px){.product-modal{padding:12px}.product-detail{grid-template-columns:1fr;max-height:94vh;overflow-y:auto}.detail-image{min-height:260px;padding:30px}.detail-image img{max-height:230px}.detail-content{padding:28px}.detail-content h2{font-size:22px}.detail-actions{flex-direction:column}.detail-cart{min-height:46px}}
 .dealer-discount-banner{position:relative;z-index:5;padding:11px 24px;background:#e8f8ef;color:#187545;text-align:center;font-size:13px;border-bottom:1px solid #c7ead6}.dealer-discount-banner strong{font-size:15px}.special-price-label{width:max-content;margin:0 0 7px;padding:5px 8px;border-radius:6px;background:#e7f8ee;color:#187747;font-size:9px;font-weight:900}.old-price{margin-bottom:3px;color:#929baa;font-size:12px;text-decoration:line-through}.summary-old-price{text-decoration:line-through;color:#8b95a6}.payment-summary dl .summary-discount{color:#16804c}.summary-discount dd{font-weight:900}
+.summary-products p{flex:1}.remove-cart-item{padding:7px 9px;border:1px solid #efc5c5;border-radius:7px;background:#fff5f5;color:#b42323;font-size:10px;font-weight:800;cursor:pointer}.remove-cart-item:hover{background:#b42323;color:#fff;border-color:#b42323}
+.contact-map{width:min(950px,100%);height:360px;margin:36px auto 0;overflow:hidden;border:1px solid #dce3ed;border-radius:14px;background:#e9edf3;box-shadow:0 12px 30px #172e6a12}.contact-map iframe{display:block;width:100%;height:100%;border:0}@media(max-width:600px){.contact-map{height:300px;margin-top:25px;border-radius:10px}}
+.creator-credit{position:fixed;z-index:1200;right:18px;bottom:14px;padding:5px;color:#536985;background:transparent;text-align:right;font-size:11px;font-weight:700;letter-spacing:.2px;text-shadow:0 1px 1px #fff}
+textarea{width:100%;min-height:88px;padding:13px 14px;border:1px solid #d9e0ec;border-radius:11px;background:#f9fbfe;color:#25365c;font:inherit;line-height:1.5;resize:vertical;outline:none}textarea:focus{background:#fff;border-color:#3862b6;box-shadow:0 0 0 4px #3862b619}.delivery-address{grid-column:1/-1}.delivery-address small{color:#8490a3;font-size:10px;font-weight:400}.profile-address{grid-column:1/-1}.profile-address dd{line-height:1.55}
+.detail-remove{width:100%;height:40px;margin-top:-14px;border:1px solid #efc1c8;border-radius:8px;background:#fff2f3;color:#b42e40;font-size:11px;font-weight:800;cursor:pointer}.detail-remove:hover{background:#c83b4d;color:#fff}.quantity button:disabled{opacity:.4;cursor:not-allowed}.product-info .add-cart:disabled{border-color:#ccd3df;background:#f3f5f8;color:#8d97a8;cursor:not-allowed}
+.summary-products{gap:0}.summary-products .summary-product-row{padding:13px 0;display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:10px;border-bottom:1px solid #edf1f6}.summary-products .summary-product-row:last-child{border-bottom:0}.summary-product-row p{gap:3px}.summary-product-row p strong{font-size:11px}.summary-product-row p small{margin:0;color:#8a96a8;font-size:9px}.summary-product-row p b{margin-top:3px;color:#173f79;font-size:11px}.summary-quantity{display:flex;align-items:center;overflow:hidden;border:1px solid #cfdaea;border-radius:8px;background:#fff}.summary-quantity button,.summary-quantity>strong{width:29px;height:30px;display:grid;place-items:center;border:0;background:#f2f6fc;color:#245ca7;font-size:12px}.summary-quantity>strong{background:#fff;color:#243b5d;font-size:10px}.summary-quantity button{cursor:pointer}.summary-quantity button:hover:not(:disabled){background:#285faf;color:#fff}.summary-quantity button:disabled{opacity:.35;cursor:not-allowed}.summary-product-row .remove-cart-item{padding:7px 9px}@media(max-width:470px){.summary-products .summary-product-row{grid-template-columns:1fr auto}.summary-quantity{grid-column:1}.summary-product-row .remove-cart-item{grid-column:2;grid-row:2}}
+.floating-cart{position:fixed;z-index:900;right:22px;bottom:24px;min-width:235px;height:78px;padding:9px 13px 9px 9px;display:flex;align-items:center;gap:11px;border:1px solid #ffffff2c;border-radius:19px;background:linear-gradient(135deg,#102f6b,#2766bd);color:#fff;box-shadow:0 18px 45px #102c6660;cursor:pointer;transition:.25s}.floating-cart:hover{transform:translateY(-4px);box-shadow:0 23px 52px #102c6675}.floating-cart-logo{position:relative;width:58px;height:58px;display:grid;place-items:center;flex:0 0 auto;border-radius:50%;background:#fff;box-shadow:inset 0 0 0 1px #dbe5f3}.floating-cart-logo img{width:48px;height:40px;object-fit:contain}.floating-cart-logo b{position:absolute;right:-4px;top:-5px;min-width:21px;height:21px;padding:0 5px;display:grid;place-items:center;border:2px solid #1e55a3;border-radius:12px;background:#25aae2;color:#fff;font-size:9px}.floating-cart-copy{min-width:105px;display:flex;flex-direction:column;align-items:flex-start}.floating-cart-copy small{color:#a9ccff;font-size:8px;font-weight:900;letter-spacing:1.4px}.floating-cart-copy strong{margin-top:3px;font-size:15px}.floating-cart-copy em{margin-top:3px;color:#d6e5fb;font-size:8px;font-style:normal}.floating-cart-arrow{margin-left:auto;width:29px;height:29px;display:grid;place-items:center;border-radius:9px;background:#ffffff18;font-size:16px}@media(max-width:650px){.floating-cart{right:12px;bottom:12px;min-width:0;width:68px;height:68px;padding:5px;border-radius:50%}.floating-cart-logo{width:56px;height:56px}.floating-cart-copy,.floating-cart-arrow{display:none}}
+.order-shipping-state{min-width:0;display:flex;flex-direction:column;align-items:flex-start;gap:5px}.order-shipping-state small{max-width:190px;overflow:hidden;color:#65758c;font-size:9px;text-overflow:ellipsis;white-space:nowrap}.tracking-actions{display:flex;align-items:center;gap:7px}.tracking-actions button,.tracking-actions a{padding:7px 9px;border:1px solid #bdd3ee;border-radius:8px;background:#f0f6ff;color:#1f5da8;font-size:9px;font-weight:800;text-decoration:none;cursor:pointer}.tracking-actions a{background:#285faf;color:#fff}.orders-table>div{grid-template-columns:1.05fr 1.15fr .7fr .9fr 1.3fr 1fr}
 </style>
