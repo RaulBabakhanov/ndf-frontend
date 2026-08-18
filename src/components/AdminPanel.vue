@@ -89,8 +89,12 @@ const activeSection = ref<
   'overview' | 'orders' | 'dealers' | 'dealer-create' | 'products' | 'analytics'
 >('overview')
 const orderFilter = ref('Tümü')
-const orderStatuses = ['Onaylandı', 'Hazırlanıyor', 'Kargoda', 'Tamamlandı', 'İptal'] as const
+const orderStatuses = ['Onaylandı', 'Hazırlanıyor', 'Kargoda', 'Tamamlandı', 'İptal', 'Silindi'] as const
 const orderFilters = ['Tümü', ...orderStatuses]
+const dateFilter = ref<'Tümü' | 'Bugün' | 'Bu Ay' | 'Tarih Aralığı'>('Tümü')
+const dateFilters = ['Tümü', 'Bugün', 'Bu Ay', 'Tarih Aralığı'] as const
+const dateFrom = ref('')
+const dateTo = ref('')
 const apiUrl = import.meta.env.VITE_API_URL ?? 'https://api.ndf.allspacesoftware.com/api/v1'
 const money = (value: string | number) =>
   new Intl.NumberFormat('tr-TR', { style: 'currency', currency: 'TRY' }).format(Number(value))
@@ -102,11 +106,22 @@ const visibleOrders = computed(() =>
   orders.value.filter(
     (order) =>
       (orderFilter.value === 'Tümü' || order.status === orderFilter.value) &&
+      matchesDateFilter(order.created_at) &&
       `${order.dealer.company} ${order.dealer.official} ${order.order_number} ${order.items.map((i) => i.name).join(' ')}`
         .toLocaleLowerCase('tr')
         .includes(search.value.toLocaleLowerCase('tr')),
   ),
 )
+function matchesDateFilter(value: string) {
+  if (dateFilter.value === 'Tümü') return true
+  const orderDate = new Date(value)
+  const now = new Date()
+  if (dateFilter.value === 'Bugün') return orderDate.toDateString() === now.toDateString()
+  if (dateFilter.value === 'Bu Ay') return orderDate.getFullYear() === now.getFullYear() && orderDate.getMonth() === now.getMonth()
+  const from = dateFrom.value ? new Date(`${dateFrom.value}T00:00:00`) : null
+  const to = dateTo.value ? new Date(`${dateTo.value}T23:59:59.999`) : null
+  return (!from || orderDate >= from) && (!to || orderDate <= to)
+}
 const totalSales = computed(() =>
   orders.value.reduce((sum, order) => sum + Number(order.total_try), 0),
 )
@@ -243,7 +258,15 @@ function statusClass(status: string) {
     'Kargoda': 'shipping',
     'Tamamlandı': 'completed',
     'İptal': 'cancelled',
+    'Silindi': 'deleted',
   }[status] || 'preparing'
+}
+async function archiveOrder(order: Order) {
+  if (!window.confirm(`#${order.order_number} tamamlanan siparişini Silindi bölümüne taşımak istiyor musunuz?`)) return
+  const previousStatus = order.status
+  order.status = 'Silindi'
+  await updateOrderStatus(order)
+  if (error.value) order.status = previousStatus
 }
 async function saveShipping(order: Order) {
   if (order.shipping_company.trim().length < 2 || order.tracking_number.trim().length < 3) {
@@ -695,15 +718,16 @@ async function deleteDealer(dealer: Dealer) {
             </div>
             <section v-else-if="activeSection === 'orders'" class="orders-workspace">
               <div class="orders-hero"><div><span>SİPARİŞ OPERASYONU</span><h2>Siparişleri yönetin</h2><p>Satış hareketlerini inceleyin, ürün detaylarını açın ve belgeleri hazırlayın.</p></div><button class="export-orders" @click="exportOrders">↓ Excel / CSV indir</button></div>
-              <div class="order-metrics"><article><span>Toplam sipariş</span><strong>{{ visibleOrders.length }}</strong><small>Filtrelenen kayıt</small></article><article><span>Ürün adedi</span><strong>{{ visibleOrderItems }}</strong><small>Siparişlerdeki toplam</small></article><article><span>Satış tutarı</span><strong>{{ money(visibleOrderSales) }}</strong><small>Filtrelenen ciro</small></article><article class="pending"><span>Aktif operasyon</span><strong>{{ orders.filter(order => !['Tamamlandı', 'İptal'].includes(order.status)).length }}</strong><small>İşlem bekleyen sipariş</small></article></div>
+              <div class="order-metrics"><article><span>Toplam sipariş</span><strong>{{ visibleOrders.length }}</strong><small>Filtrelenen kayıt</small></article><article><span>Ürün adedi</span><strong>{{ visibleOrderItems }}</strong><small>Siparişlerdeki toplam</small></article><article><span>Satış tutarı</span><strong>{{ money(visibleOrderSales) }}</strong><small>Filtrelenen ciro</small></article><article class="pending"><span>Aktif operasyon</span><strong>{{ orders.filter(order => !['Tamamlandı', 'İptal', 'Silindi'].includes(order.status)).length }}</strong><small>İşlem bekleyen sipariş</small></article></div>
               <div class="orders-toolbar"><label>⌕<input v-model="search" placeholder="Sipariş no, bayi veya ürün ara..." /></label><div class="filter-pills"><button v-for="filter in orderFilters" :key="filter" :class="{ active: orderFilter === filter }" @click="orderFilter = filter">{{ filter }}</button></div><button title="Siparişleri yenile" class="orders-refresh" @click="refreshData">↻ Yenile</button></div>
+              <div class="orders-date-toolbar"><div class="date-pills"><button v-for="filter in dateFilters" :key="filter" :class="{ active: dateFilter === filter }" @click="dateFilter = filter">{{ filter }}</button></div><div v-if="dateFilter === 'Tarih Aralığı'" class="date-range"><label>Başlangıç<input v-model="dateFrom" type="date" /></label><span>→</span><label>Bitiş<input v-model="dateTo" type="date" /></label></div><span class="date-result">{{ visibleOrders.length }} sipariş gösteriliyor</span></div>
               <div v-if="visibleOrders.length" class="advanced-order-list">
                 <article v-for="order in visibleOrders" :key="order.id" :class="{ expanded: expandedOrderId === order.id }">
-                  <div class="order-main"><span class="order-avatar">{{ order.dealer.company.charAt(0).toUpperCase() }}</span><div class="order-identity"><small>SİPARİŞ NO</small><strong>#{{ order.order_number }}</strong><span>{{ order.dealer.company }} · {{ order.dealer.official }}</span></div><div class="order-product-preview"><small>ÜRÜNLER</small><strong>{{ order.items.reduce((sum, item) => sum + item.quantity, 0) }} ürün</strong><span>{{ cleanText(order.items[0]?.name || '') }}<template v-if="order.items.length > 1"> +{{ order.items.length - 1 }} kalem</template></span></div><div class="order-date"><small>TARİH</small><strong>{{ date(order.created_at) }}</strong></div><div class="order-amount"><small>TOPLAM</small><strong>{{ money(order.total_try) }}</strong></div><label :class="['order-status-control', statusClass(order.status)]"><small>DURUM</small><select v-model="order.status" :disabled="savingOrderStatusId === order.id" @change="updateOrderStatus(order)"><option v-for="status in orderStatuses" :key="status">{{ status }}</option></select></label><div class="order-actions"><button @click="expandedOrderId = expandedOrderId === order.id ? null : order.id">{{ expandedOrderId === order.id ? 'Kapat' : 'Detay' }}</button><button class="pdf-button" @click="printOrder(order)">▣ PDF</button></div></div>
+                  <div class="order-main"><span class="order-avatar">{{ order.dealer.company.charAt(0).toUpperCase() }}</span><div class="order-identity"><small>SİPARİŞ NO</small><strong>#{{ order.order_number }}</strong><span>{{ order.dealer.company }} · {{ order.dealer.official }}</span></div><div class="order-product-preview"><small>ÜRÜNLER</small><strong>{{ order.items.reduce((sum, item) => sum + item.quantity, 0) }} ürün</strong><span>{{ cleanText(order.items[0]?.name || '') }}<template v-if="order.items.length > 1"> +{{ order.items.length - 1 }} kalem</template></span></div><div class="order-date"><small>TARİH</small><strong>{{ date(order.created_at) }}</strong></div><div class="order-amount"><small>TOPLAM</small><strong>{{ money(order.total_try) }}</strong></div><label :class="['order-status-control', statusClass(order.status)]"><small>DURUM</small><select v-model="order.status" :disabled="savingOrderStatusId === order.id" @change="updateOrderStatus(order)"><option v-for="status in orderStatuses" :key="status">{{ status }}</option></select></label><div class="order-actions"><button @click="expandedOrderId = expandedOrderId === order.id ? null : order.id">{{ expandedOrderId === order.id ? 'Kapat' : 'Detay' }}</button><button class="pdf-button" @click="printOrder(order)">▣ PDF</button><button v-if="order.status === 'Tamamlandı'" class="archive-order" @click="archiveOrder(order)">Sil</button></div></div>
                   <div v-if="expandedOrderId === order.id" class="order-details"><header><strong>Sipariş içeriği</strong><span>{{ order.items.length }} farklı kalem</span></header><div v-for="item in order.items" :key="item.name" class="order-detail-row"><span>{{ item.quantity }}×</span><strong>{{ cleanText(item.name) }}</strong><small>{{ money(item.unit_price_try) }} / adet</small><b>{{ money(Number(item.unit_price_try) * item.quantity) }}</b></div><section class="shipping-editor"><div><span>🚚</span><p><strong>Kargo ve takip</strong><small>Bilgiler kaydedildiğinde sipariş Kargoda durumuna geçer.</small></p></div><label>Kargo firması<input v-model.trim="order.shipping_company" list="shipping-companies" placeholder="Firma seçin" /></label><label>Takip numarası<input v-model.trim="order.tracking_number" placeholder="Takip numarasını girin" /></label><button :disabled="savingShippingId === order.id" @click="saveShipping(order)">{{ savingShippingId === order.id ? 'Kaydediliyor…' : 'Kargoya ver' }}</button><datalist id="shipping-companies"><option>Yurtiçi Kargo</option><option>Aras Kargo</option><option>MNG Kargo</option><option>Sürat Kargo</option><option>PTT Kargo</option><option>Hepsijet</option><option>Trendyol Express</option></datalist></section><footer v-if="order.shipping_address || order.note"><div v-if="order.shipping_address"><span>TESLİMAT ADRESİ</span><p>{{ order.shipping_address }}</p></div><div v-if="order.note"><span>SİPARİŞ NOTU</span><p>{{ order.note }}</p></div></footer></div>
                 </article>
               </div>
-              <div v-else class="smart-empty order-empty"><div>▤</div><h3>Sipariş bulunamadı</h3><p>Arama metnini veya durum filtresini değiştirerek tekrar deneyin.</p><button @click="search = ''; orderFilter = 'Tümü'">Filtreleri temizle</button></div>
+              <div v-else class="smart-empty order-empty"><div>▤</div><h3>Sipariş bulunamadı</h3><p>Arama metnini, durum veya tarih filtresini değiştirerek tekrar deneyin.</p><button @click="search = ''; orderFilter = 'Tümü'; dateFilter = 'Tümü'; dateFrom = ''; dateTo = ''">Filtreleri temizle</button></div>
             </section>
             <section v-else class="modern-card full-card">
               <div class="card-heading">
@@ -3364,4 +3388,5 @@ header a {
 @media(max-width:1200px){.order-status-control{display:none}}
 .order-details>footer{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;background:transparent;border:0;padding:0}.order-details>footer>div{padding:13px;border:1px solid #e5d6b8;border-radius:10px;background:#fff8e9}.order-details>footer span{color:#8b651e;letter-spacing:.7px}.order-details>footer p{color:#56657a;line-height:1.5}.dealer-address-field{grid-column:1/-1}.dealer-form textarea{min-height:82px;padding:11px 12px;border:1px solid #ccd8e8;border-radius:9px;background:#f9fbfe;font:inherit;resize:vertical}.dealer-form textarea:focus{border-color:#2b67b8;outline:0;box-shadow:0 0 0 3px #2b67b815}@media(max-width:700px){.order-details>footer{grid-template-columns:1fr}}
 .shipping-editor{margin:12px 0;padding:14px;display:grid;grid-template-columns:minmax(210px,1.3fr) 1fr 1fr auto;align-items:end;gap:12px;border:1px solid #c9dcf1;border-radius:12px;background:linear-gradient(120deg,#edf5ff,#f8fbff)}.shipping-editor>div{display:flex;align-items:center;gap:10px}.shipping-editor>div>span{width:38px;height:38px;display:grid;place-items:center;border-radius:10px;background:#dcecff;font-size:19px}.shipping-editor p,.shipping-editor label{display:flex;flex-direction:column;gap:4px;margin:0}.shipping-editor p strong{color:#174b89;font-size:12px}.shipping-editor p small,.shipping-editor label{color:#73849a;font-size:9px}.shipping-editor input{height:40px;padding:0 11px;border:1px solid #bfd1e7;border-radius:9px;background:#fff;color:#203b62;outline:0}.shipping-editor input:focus{border-color:#2a67b8;box-shadow:0 0 0 3px #2a67b812}.shipping-editor>button{height:40px;padding:0 15px;border:0;border-radius:9px;background:#2865b5;color:#fff;font-size:10px;font-weight:900;cursor:pointer}.shipping-editor>button:disabled{opacity:.55;cursor:wait}@media(max-width:1000px){.shipping-editor{grid-template-columns:1fr 1fr}.shipping-editor>div{grid-column:1/-1}}@media(max-width:650px){.shipping-editor{grid-template-columns:1fr}.shipping-editor>div{grid-column:auto}}
+.orders-date-toolbar{margin-top:-7px;padding:11px 14px;display:flex;align-items:center;gap:14px;border:1px solid #dce6f2;border-radius:14px;background:#fff;box-shadow:0 7px 22px #16386508}.date-pills{display:flex;gap:6px}.date-pills button{height:36px;padding:0 14px;border:1px solid #d9e3ef;border-radius:9px;background:#f7f9fc;color:#65758d;font-size:10px;font-weight:900;cursor:pointer}.date-pills button.active{border-color:#2865b5;background:#2865b5;color:#fff}.date-range{display:flex;align-items:center;gap:8px}.date-range label{display:flex;align-items:center;gap:7px;color:#74839a;font-size:9px;font-weight:800}.date-range input{width:135px;height:36px;padding:0 9px;border:1px solid #cfdbeb;border-radius:8px;background:#f9fbfe;color:#243d62}.date-result{margin-left:auto;color:#7c899c;font-size:10px;font-weight:800}.order-actions .archive-order{border-color:#efbdc4;background:#fff0f2;color:#b3293e}.order-actions .archive-order:hover{background:#bd3045;color:#fff}.order-status-control.deleted select{border-color:#cad0d9;background:#eff1f4;color:#687385}@media(max-width:900px){.orders-date-toolbar{align-items:stretch;flex-direction:column}.date-pills{overflow:auto}.date-pills button{white-space:nowrap}.date-range{flex-wrap:wrap}.date-result{margin-left:0}.date-range input{width:125px}}
 </style>
