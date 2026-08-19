@@ -56,6 +56,17 @@ export interface OrderDto {
   items: Array<{ product_id: number; quantity: number; unit_price_try: string }>
 }
 
+export interface ExchangeRatesDto {
+  base: 'TRY'
+  usd_try: string
+  eur_try: string
+  published_at: string
+  fetched_at: string
+  source: string
+  cached: boolean
+  stale: boolean
+}
+
 export class ApiError extends Error {
   constructor(public readonly status: number, message: string) {
     super(message)
@@ -85,6 +96,7 @@ export const api = {
   login: (email: string, password: string, turnstileToken: string) => request<AuthDto>('/auth/login', { method: 'POST', body: JSON.stringify({ email, password, turnstile_token: turnstileToken, website: '' }) }),
   me: () => request<DealerDto>('/auth/me'),
   products: (page = 1, size = 100) => request<ProductPageDto>(`/products?page=${page}&size=${size}`),
+  exchangeRates: () => request<ExchangeRatesDto>('/exchange-rates'),
   orders: () => request<OrderDto[]>('/orders'),
   createOrder: (items: Array<{ product_id: number; quantity: number }>, note: string, shippingAddress: string) =>
     request<OrderDto>('/orders', { method: 'POST', body: JSON.stringify({ items, note, shipping_address: shippingAddress }) }),

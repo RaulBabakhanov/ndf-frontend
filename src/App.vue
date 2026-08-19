@@ -86,8 +86,7 @@ const deliveryAddress = ref('')
 const orders = ref<Order[]>([])
 const currentPage = ref(1)
 const pageSize = 24
-const usdToTry = 47.7364
-const eurToTry = 55.75
+const exchangeRates = reactive({ USD: 47.7364, EUR: 55.75, source: 'Yedek kur', publishedAt: '', stale: true })
 const catalogCurrency = ref<'TRY' | 'USD' | 'EUR'>('TRY')
 const sortOrder = ref<'recommended' | 'price-asc' | 'price-desc'>('recommended')
 const selectedProduct = ref<CatalogProduct | null>(null)
@@ -114,13 +113,13 @@ const pageCount = computed(() => Math.max(1, Math.ceil(filteredProducts.value.le
 const pagedProducts = computed(() => sortedProducts.value.slice((currentPage.value - 1) * pageSize, currentPage.value * pageSize))
 const cartCount = computed(() => Object.values(cart).reduce((sum, count) => sum + count, 0))
 const discountedPrice = (price: number) => price * (1 - (currentDealer.value?.discountPercent || 0) / 100)
-const cartTotal = computed(() => products.reduce((sum, product) => sum + discountedPrice(product.price) * usdToTry * (cart[product.id] || 0), 0))
+const cartTotal = computed(() => products.reduce((sum, product) => sum + discountedPrice(product.price) * exchangeRates.USD * (cart[product.id] || 0), 0))
 const money = (value: number) => new Intl.NumberFormat('tr-TR', { style: 'currency', currency: 'TRY', maximumFractionDigits: 2 }).format(value)
 const dollar = (value: number) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value)
 const euro = (value: number) => new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' }).format(value)
 function apiProductPriceUsd(product: ProductDto) {
-  if (product.default_currency === 'TRY' && product.price_try !== null) return Number(product.price_try) / usdToTry
-  if (product.default_currency === 'EUR' && product.price_eur !== null) return Number(product.price_eur) * eurToTry / usdToTry
+  if (product.default_currency === 'TRY' && product.price_try !== null) return Number(product.price_try) / exchangeRates.USD
+  if (product.default_currency === 'EUR' && product.price_eur !== null) return Number(product.price_eur) * exchangeRates.EUR / exchangeRates.USD
   return Number(product.price_usd)
 }
 async function loadProducts() {
@@ -142,15 +141,23 @@ async function loadProducts() {
     url: product.external_url,
   })))
 }
+async function loadExchangeRates() {
+  const rates = await api.exchangeRates()
+  exchangeRates.USD = Number(rates.usd_try)
+  exchangeRates.EUR = Number(rates.eur_try)
+  exchangeRates.source = rates.source
+  exchangeRates.publishedAt = rates.published_at
+  exchangeRates.stale = rates.stale
+}
 const productPrice = (usdPrice: number) => {
   const discountedUsd = discountedPrice(usdPrice)
-  if (catalogCurrency.value === 'TRY') return money(discountedUsd * usdToTry)
-  if (catalogCurrency.value === 'EUR') return euro(discountedUsd * usdToTry / eurToTry)
+  if (catalogCurrency.value === 'TRY') return money(discountedUsd * exchangeRates.USD)
+  if (catalogCurrency.value === 'EUR') return euro(discountedUsd * exchangeRates.USD / exchangeRates.EUR)
   return dollar(discountedUsd)
 }
 const alternatePrice = (usdPrice: number) => catalogCurrency.value === 'TRY'
   ? dollar(discountedPrice(usdPrice))
-  : money(discountedPrice(usdPrice) * usdToTry)
+  : money(discountedPrice(usdPrice) * exchangeRates.USD)
 function clearCart() {
   Object.keys(cart).forEach((id) => delete cart[Number(id)])
 }
@@ -198,6 +205,7 @@ function applyAuth(auth: AuthDto) {
   localStorage.setItem('ndfDealerSession', JSON.stringify(dealer))
 }
 onMounted(async () => {
+  try { await loadExchangeRates() } catch { /* API ulaşılamazsa güvenli yedek kur kullanılır. */ }
   if (!isAdminPage) {
     try { await loadProducts() } catch { /* Backend ulaşılamazsa sabit katalog gösterilir. */ }
   }
@@ -412,7 +420,7 @@ function logout() {
           <div class="order-filters"><button class="active">Tümü <b>{{ orders.length + (cartCount ? 1 : 0) }}</b></button><button>Sepette <b>{{ cartCount ? 1 : 0 }}</b></button><button>Hazırlanıyor <b>{{ orders.length }}</b></button><button>Tamamlandı <b>0</b></button></div>
           <div v-if="cartCount" class="cart-draft">
             <div class="draft-heading"><div><span>▤</span><p><small>SİPARİŞ TASLAĞI</small><strong>Sepetiniz ödeme bekliyor</strong></p></div><div class="draft-status">Ödeme Bekliyor</div></div>
-            <div class="draft-products"><div v-for="product in products.filter(p => cart[p.id])" :key="product.id"><img :src="product.image || heroBg" :alt="product.name" /><p><strong>{{ product.name }}</strong><small>{{ cart[product.id] || 0 }} adet × {{ money(discountedPrice(product.price) * usdToTry) }}</small></p><b>{{ money(discountedPrice(product.price) * usdToTry * (cart[product.id] || 0)) }}</b></div></div>
+            <div class="draft-products"><div v-for="product in products.filter(p => cart[p.id])" :key="product.id"><img :src="product.image || heroBg" :alt="product.name" /><p><strong>{{ product.name }}</strong><small>{{ cart[product.id] || 0 }} adet × {{ money(discountedPrice(product.price) * exchangeRates.USD) }}</small></p><b>{{ money(discountedPrice(product.price) * exchangeRates.USD * (cart[product.id] || 0)) }}</b></div></div>
             <div class="draft-footer"><p><small>SEPET TOPLAMI</small><strong>{{ money(cartTotal) }}</strong></p><button @click="openTab('payments')">Ödemeye devam et <span>→</span></button></div>
           </div>
           <div v-if="orders.length" class="orders-table">
@@ -441,7 +449,7 @@ function logout() {
               <p v-if="paymentNotice" :class="['notice', paymentNotice.includes('başarıyla') ? 'success' : 'error']">{{ paymentNotice }}</p>
               <button class="pay-button" type="submit">🔒 {{ money(cartTotal) }} GÜVENLE ÖDE</button>
             </form>
-            <aside class="payment-summary"><div class="summary-heading"><h3>Sipariş Özeti</h3><span v-if="cartCount">{{ cartCount }} ürün</span></div><div v-if="cartCount" class="summary-products"><div v-for="product in products.filter(p => cart[p.id])" :key="product.id" class="summary-product-row"><p><strong>{{ product.name }}</strong><small>Birim: {{ money(discountedPrice(product.price) * usdToTry) }}</small><b>{{ money(discountedPrice(product.price) * usdToTry * (cart[product.id] || 0)) }}</b></p><div class="summary-quantity"><button type="button" aria-label="Bir adet azalt" @click="changeCartQuantity(product.id, -1)">−</button><strong>{{ cart[product.id] }}</strong><button type="button" aria-label="Bir adet artır" :disabled="(cart[product.id] || 0) >= product.stock" @click="changeCartQuantity(product.id, 1)">＋</button></div><button class="remove-cart-item" type="button" :aria-label="`${product.name} ürününü tamamen sil`" @click="removeFromCart(product.id)">Sil</button></div></div><div v-else class="empty-cart">🛒<strong>Sepetiniz boş</strong><button @click="openTab('products')">Ürünlere göz at</button></div><dl><div><dt>Ara toplam</dt><dd>{{ money(cartTotal) }}</dd></div><div><dt>KDV</dt><dd>Fiyata dahil</dd></div><div class="summary-total"><dt>Toplam</dt><dd>{{ money(cartTotal) }}</dd></div></dl><p class="payment-note">🔐 Kart bilgileriniz sistemimizde saklanmaz.</p></aside>
+            <aside class="payment-summary"><div class="summary-heading"><h3>Sipariş Özeti</h3><span v-if="cartCount">{{ cartCount }} ürün</span></div><div v-if="cartCount" class="summary-products"><div v-for="product in products.filter(p => cart[p.id])" :key="product.id" class="summary-product-row"><p><strong>{{ product.name }}</strong><small>Birim: {{ money(discountedPrice(product.price) * exchangeRates.USD) }}</small><b>{{ money(discountedPrice(product.price) * exchangeRates.USD * (cart[product.id] || 0)) }}</b></p><div class="summary-quantity"><button type="button" aria-label="Bir adet azalt" @click="changeCartQuantity(product.id, -1)">−</button><strong>{{ cart[product.id] }}</strong><button type="button" aria-label="Bir adet artır" :disabled="(cart[product.id] || 0) >= product.stock" @click="changeCartQuantity(product.id, 1)">＋</button></div><button class="remove-cart-item" type="button" :aria-label="`${product.name} ürününü tamamen sil`" @click="removeFromCart(product.id)">Sil</button></div></div><div v-else class="empty-cart">🛒<strong>Sepetiniz boş</strong><button @click="openTab('products')">Ürünlere göz at</button></div><dl><div><dt>Ara toplam</dt><dd>{{ money(cartTotal) }}</dd></div><div><dt>KDV</dt><dd>Fiyata dahil</dd></div><div class="summary-total"><dt>Toplam</dt><dd>{{ money(cartTotal) }}</dd></div></dl><p class="payment-note">🔐 Kart bilgileriniz sistemimizde saklanmaz.</p></aside>
           </div>
         </section>
 

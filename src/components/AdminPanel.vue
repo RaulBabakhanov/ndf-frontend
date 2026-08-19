@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
+import TurnstileWidget from './TurnstileWidget.vue'
 
 interface Dealer {
   id: number
@@ -39,8 +40,14 @@ interface AdminProduct {
   image_url: string
 }
 
-const adminKey = ref('')
+const adminUsername = 'admin'
+const adminPassword = ref('')
+const adminToken = ref(sessionStorage.getItem('ndfAdminToken') || '')
+const adminHeaders = () => ({ Authorization: `Bearer ${adminToken.value}` })
 const authenticated = ref(false)
+const turnstileSiteKey = import.meta.env.VITE_TURNSTILE_SITE_KEY || ''
+const adminTurnstileToken = ref('')
+const adminCaptcha = ref<InstanceType<typeof TurnstileWidget> | null>(null)
 const dealers = ref<Dealer[]>([])
 const orders = ref<Order[]>([])
 const products = ref<AdminProduct[]>([])
@@ -85,8 +92,9 @@ const savingShippingId = ref<number | null>(null)
 const deletingDealerId = ref<number | null>(null)
 const expandedOrderId = ref<number | null>(null)
 const success = ref('')
+const exchangeRates = ref({ usd: '', eur: '', publishedAt: '', source: 'TCMB', stale: false })
 const activeSection = ref<
-  'overview' | 'orders' | 'dealers' | 'dealer-create' | 'products' | 'analytics'
+  'overview' | 'orders' | 'dealers' | 'dealer-create' | 'products' | 'product-create' | 'analytics'
 >('overview')
 const orderFilter = ref('Tümü')
 const orderStatuses = ['Onaylandı', 'Hazırlanıyor', 'Kargoda', 'Tamamlandı', 'İptal', 'Silindi'] as const
@@ -102,6 +110,22 @@ const date = (value: string) =>
   new Intl.DateTimeFormat('tr-TR', { dateStyle: 'medium', timeStyle: 'short' }).format(
     new Date(value),
   )
+async function loadExchangeRates() {
+  try {
+    const response = await fetch(`${apiUrl}/exchange-rates`)
+    if (!response.ok) return
+    const rates = await response.json()
+    exchangeRates.value = {
+      usd: rates.usd_try,
+      eur: rates.eur_try,
+      publishedAt: rates.published_at,
+      source: rates.source,
+      stale: rates.stale,
+    }
+  } catch {
+    exchangeRates.value.stale = true
+  }
+}
 const visibleOrders = computed(() =>
   orders.value.filter(
     (order) =>
@@ -206,12 +230,22 @@ async function login() {
   loading.value = true
   error.value = ''
   try {
-    const response = await fetch(`${apiUrl}/admin/dashboard`, {
-      headers: { 'X-Admin-Key': adminKey.value },
+    if (!adminTurnstileToken.value) throw new Error('Lütfen bot doğrulamasını tamamlayın.')
+    const response = await fetch(`${apiUrl}/admin/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Turnstile-Token': adminTurnstileToken.value,
+      },
+      body: JSON.stringify({ username: adminUsername, password: adminPassword.value }),
     })
-    if (!response.ok)
-      throw new Error(response.status === 401 ? 'Yönetici anahtarı hatalı.' : 'Veriler alınamadı.')
-    const data = await response.json()
+    if (!response.ok) {
+      const detail = (await response.json().catch(() => ({}))).detail
+      throw new Error(response.status === 401 ? 'Yönetici anahtarı hatalı.' : detail || 'Veriler alınamadı.')
+    }
+    const result = await response.json()
+    const data = result.dashboard
+    adminToken.value = result.access_token
     dealers.value = data.dealers
     orders.value = data.orders.map((order: Order) => ({
       ...order,
@@ -223,23 +257,47 @@ async function login() {
       category: cleanText(product.category),
     }))
     authenticated.value = true
-    sessionStorage.setItem('ndfAdminKey', adminKey.value)
+    sessionStorage.setItem('ndfAdminToken', adminToken.value)
+    adminPassword.value = ''
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : 'Bağlantı hatası.'
+    adminCaptcha.value?.reset()
   } finally {
     loading.value = false
   }
 }
 async function refreshData() {
-  await login()
+  error.value = ''
+  const response = await fetch(`${apiUrl}/admin/dashboard`, {
+    headers: adminHeaders(),
+  })
+  if (!response.ok) return void (error.value = 'Veriler yenilenemedi.')
+  const data = await response.json()
+  dealers.value = data.dealers
+  orders.value = data.orders.map((order: Order) => ({
+    ...order,
+    items: order.items.map((item) => ({ ...item, name: cleanText(item.name) })),
+  }))
+  products.value = data.products.map((product: AdminProduct) => ({
+    ...product,
+    name: cleanText(product.name),
+    category: cleanText(product.category),
+  }))
 }
+onMounted(async () => {
+  await loadExchangeRates()
+  if (!adminToken.value) return
+  await refreshData()
+  if (!error.value) authenticated.value = true
+  else sessionStorage.removeItem('ndfAdminToken')
+})
 async function updateOrderStatus(order: Order) {
   error.value = ''
   success.value = ''
   savingOrderStatusId.value = order.id
   const response = await fetch(`${apiUrl}/admin/orders/${order.id}/status`, {
     method: 'PATCH',
-    headers: { 'X-Admin-Key': adminKey.value, 'Content-Type': 'application/json' },
+    headers: { ...adminHeaders(), 'Content-Type': 'application/json' },
     body: JSON.stringify({ status: order.status }),
   })
   if (!response.ok) {
@@ -277,7 +335,7 @@ async function saveShipping(order: Order) {
   savingShippingId.value = order.id
   const response = await fetch(`${apiUrl}/admin/orders/${order.id}/shipping`, {
     method: 'PATCH',
-    headers: { 'X-Admin-Key': adminKey.value, 'Content-Type': 'application/json' },
+    headers: { ...adminHeaders(), 'Content-Type': 'application/json' },
     body: JSON.stringify({
       shipping_company: order.shipping_company,
       tracking_number: order.tracking_number,
@@ -294,32 +352,31 @@ async function saveShipping(order: Order) {
 }
 function logout() {
   authenticated.value = false
-  adminKey.value = ''
+  adminPassword.value = ''
+  adminToken.value = ''
   dealers.value = []
   orders.value = []
-  sessionStorage.removeItem('ndfAdminKey')
+  sessionStorage.removeItem('ndfAdminToken')
 }
 function exportOrders() {
-  const rows = [
-    ['Sipariş No', 'Firma', 'Yetkili', 'Ürünler', 'Tutar', 'Durum', 'Tarih'],
-    ...orders.value.map((order) => [
-      order.order_number,
-      order.dealer.company,
-      order.dealer.official,
-      order.items.map((item) => `${item.quantity}x ${item.name}`).join(' | '),
-      order.total_try,
-      order.status,
-      order.created_at,
-    ]),
-  ]
-  const csv = rows
-    .map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(';'))
-    .join('\n')
-  const link = document.createElement('a')
-  link.href = URL.createObjectURL(new Blob(['\ufeff', csv], { type: 'text/csv;charset=utf-8' }))
-  link.download = 'ndf-siparisler.csv'
-  link.click()
-  URL.revokeObjectURL(link.href)
+  const popup = window.open('', '_blank', 'width=1200,height=850')
+  if (!popup) return void alert('PDF çıktısı için açılır pencereye izin verin.')
+
+  const rows = visibleOrders.value
+    .map(
+      (order) =>
+        `<tr><td>#${escapeHtml(order.order_number)}</td><td><strong>${escapeHtml(order.dealer.company)}</strong><br><small>${escapeHtml(order.dealer.official)}</small></td><td>${escapeHtml(order.items.map((item) => `${item.quantity}× ${cleanText(item.name)}`).join(', '))}</td><td>${escapeHtml(date(order.created_at))}</td><td>${escapeHtml(order.status)}</td><td>${escapeHtml(money(order.total_try))}</td></tr>`,
+    )
+    .join('')
+  const generatedAt = new Intl.DateTimeFormat('tr-TR', {
+    dateStyle: 'long',
+    timeStyle: 'short',
+  }).format(new Date())
+
+  popup.document.write(
+    `<!doctype html><html lang="tr"><head><meta charset="utf-8"><title>NDF Sipariş Raporu</title><style>@page{size:A4 landscape;margin:14mm}*{box-sizing:border-box}body{margin:0;color:#142b55;font:12px Arial,sans-serif}.header{display:flex;justify-content:space-between;align-items:center;padding-bottom:18px;border-bottom:3px solid #174b95}.logo{padding:10px 14px;border-radius:8px;background:#174b95;color:#fff;font-size:22px;font-weight:900;letter-spacing:4px}.header h1{margin:0;font-size:23px}.header p{margin:5px 0 0;color:#6f7d92}.summary{display:flex;gap:12px;margin:18px 0}.summary div{min-width:150px;padding:12px;border:1px solid #dce3ee;border-radius:8px}.summary span{display:block;color:#78869a;font-size:9px;text-transform:uppercase}.summary strong{display:block;margin-top:5px;font-size:16px}table{width:100%;border-collapse:collapse;table-layout:fixed}th,td{padding:10px 8px;text-align:left;border-bottom:1px solid #e1e6ee;vertical-align:top;overflow-wrap:anywhere}th{background:#174b95;color:#fff;font-size:9px;text-transform:uppercase}th:nth-child(1){width:10%}th:nth-child(2){width:17%}th:nth-child(3){width:32%}th:nth-child(4){width:12%}th:nth-child(5){width:12%}th:nth-child(6){width:17%}td:last-child,th:last-child{text-align:right}small{color:#78869a}.empty{padding:35px;text-align:center;color:#78869a}.footer{margin-top:22px;padding-top:10px;border-top:1px solid #dce3ee;color:#8692a4;font-size:9px;text-align:center}@media print{button{display:none}thead{display:table-header-group}tr{break-inside:avoid}}</style></head><body><div class="header"><div class="logo">NDF</div><div><h1>Sipariş Raporu</h1><p>${escapeHtml(generatedAt)} tarihinde oluşturuldu</p></div></div><div class="summary"><div><span>Sipariş sayısı</span><strong>${visibleOrders.value.length}</strong></div><div><span>Ürün adedi</span><strong>${visibleOrderItems.value}</strong></div><div><span>Toplam satış</span><strong>${escapeHtml(money(visibleOrderSales.value))}</strong></div></div>${rows ? `<table><thead><tr><th>Sipariş No</th><th>Bayi</th><th>Ürünler</th><th>Tarih</th><th>Durum</th><th>Tutar</th></tr></thead><tbody>${rows}</tbody></table>` : '<div class="empty">Seçili filtrelere uygun sipariş bulunamadı.</div>'}<div class="footer">NDF Makina · Yönetim paneli sipariş raporu</div><script>window.onload=()=>setTimeout(()=>window.print(),250)<\/script></body></html>`,
+  )
+  popup.document.close()
 }
 const escapeHtml = (value: unknown) =>
   String(value ?? '').replace(
@@ -361,7 +418,7 @@ async function addProduct() {
   if (productImage.value) data.append('image', productImage.value)
   const response = await fetch(`${apiUrl}/admin/products`, {
     method: 'POST',
-    headers: { 'X-Admin-Key': adminKey.value },
+    headers: adminHeaders(),
     body: data,
   })
   if (!response.ok)
@@ -394,7 +451,7 @@ async function saveProduct(product: AdminProduct) {
   if (product.price_eur !== '') data.append('price_eur', product.price_eur)
   const response = await fetch(`${apiUrl}/admin/products/${product.id}`, {
     method: 'PATCH',
-    headers: { 'X-Admin-Key': adminKey.value },
+    headers: adminHeaders(),
     body: data,
   })
   if (!response.ok) {
@@ -413,7 +470,7 @@ async function deleteProduct(product: AdminProduct) {
   deletingProductId.value = product.id
   const response = await fetch(`${apiUrl}/admin/products/${product.id}`, {
     method: 'DELETE',
-    headers: { 'X-Admin-Key': adminKey.value },
+    headers: adminHeaders(),
   })
   if (!response.ok) {
     deletingProductId.value = null
@@ -427,7 +484,7 @@ async function deleteProduct(product: AdminProduct) {
 async function addDealer() {
   const response = await fetch(`${apiUrl}/admin/dealers`, {
     method: 'POST',
-    headers: { 'X-Admin-Key': adminKey.value, 'Content-Type': 'application/json' },
+    headers: { ...adminHeaders(), 'Content-Type': 'application/json' },
     body: JSON.stringify(dealerForm.value),
   })
   if (!response.ok)
@@ -450,7 +507,7 @@ async function saveDealerDiscount(dealer: Dealer) {
   error.value = ''
   const response = await fetch(`${apiUrl}/admin/dealers/${dealer.id}/discount`, {
     method: 'PATCH',
-    headers: { 'X-Admin-Key': adminKey.value, 'Content-Type': 'application/json' },
+    headers: { ...adminHeaders(), 'Content-Type': 'application/json' },
     body: JSON.stringify({ discount_percent: Number(dealer.discount_percent) }),
   })
   if (!response.ok)
@@ -463,7 +520,7 @@ async function setDealerApproval(dealer: Dealer, isApproved: boolean) {
   success.value = ''
   const response = await fetch(`${apiUrl}/admin/dealers/${dealer.id}/approval`, {
     method: 'PATCH',
-    headers: { 'X-Admin-Key': adminKey.value, 'Content-Type': 'application/json' },
+    headers: { ...adminHeaders(), 'Content-Type': 'application/json' },
     body: JSON.stringify({ is_approved: isApproved }),
   })
   if (!response.ok)
@@ -486,7 +543,7 @@ async function deleteDealer(dealer: Dealer) {
   deletingDealerId.value = dealer.id
   const response = await fetch(`${apiUrl}/admin/dealers/${dealer.id}`, {
     method: 'DELETE',
-    headers: { 'X-Admin-Key': adminKey.value },
+    headers: adminHeaders(),
   })
   if (!response.ok) {
     deletingDealerId.value = null
@@ -532,7 +589,7 @@ async function deleteDealer(dealer: Dealer) {
           <div class="password-field">
             <span>⌁</span
             ><input
-              v-model="adminKey"
+              v-model="adminPassword"
               type="password"
               required
               autofocus
@@ -540,7 +597,12 @@ async function deleteDealer(dealer: Dealer) {
               placeholder="Şifrenizi girin"
             />
           </div>
-          <button :disabled="loading">
+          <TurnstileWidget
+            ref="adminCaptcha"
+            :site-key="turnstileSiteKey"
+            @verified="adminTurnstileToken = $event"
+          />
+          <button :disabled="loading || !adminTurnstileToken">
             <span>{{ loading ? 'Kontrol ediliyor…' : 'Panele giriş yap' }}</span
             ><b>→</b>
           </button>
@@ -578,6 +640,11 @@ async function deleteDealer(dealer: Dealer) {
             >
               <span>▦</span>Ürünler<b>{{ products.length }}</b></button
             ><button
+              :class="{ active: activeSection === 'product-create' }"
+              @click="activeSection = 'product-create'"
+            >
+              <span>＋</span>Yeni Ürün</button
+            ><button
               :class="{ active: activeSection === 'analytics' }"
               @click="activeSection = 'analytics'"
             >
@@ -611,6 +678,8 @@ async function deleteDealer(dealer: Dealer) {
                         ? 'Bayi Yönetimi'
                         : activeSection === 'products'
                           ? 'Ürün Yönetimi'
+                          : activeSection === 'product-create'
+                            ? 'Yeni Ürün Oluştur'
                           : activeSection === 'analytics'
                             ? 'Analiz Merkezi'
                             : 'Yeni Cari'
@@ -619,6 +688,11 @@ async function deleteDealer(dealer: Dealer) {
             </div>
             <div class="top-actions">
               <label>⌕<input v-model="search" placeholder="Bayi, sipariş veya ürün ara..." /></label
+              ><div v-if="['overview', 'product-create'].includes(activeSection) && exchangeRates.usd && exchangeRates.eur" :class="['top-live-rates', { stale: exchangeRates.stale }]">
+                <span><small>USD</small><strong>₺{{ Number(exchangeRates.usd).toLocaleString('tr-TR', { minimumFractionDigits: 4 }) }}</strong></span>
+                <i></i><span><small>EUR</small><strong>₺{{ Number(exchangeRates.eur).toLocaleString('tr-TR', { minimumFractionDigits: 4 }) }}</strong></span>
+                <em>{{ exchangeRates.source }}</em>
+              </div
               ><button title="Verileri yenile" @click="refreshData">↻</button>
             </div>
           </header>
@@ -629,7 +703,6 @@ async function deleteDealer(dealer: Dealer) {
                 <h1>İşletmeniz tek bakışta.</h1>
                 <p>Satışları, siparişleri ve bayi hareketlerini buradan takip edin.</p>
               </div>
-              <div class="live-chip"><i></i> Sistem aktif</div>
             </div>
             <div v-if="activeSection === 'overview'" class="dashboard-overview">
               <div class="metric-grid">
@@ -717,7 +790,7 @@ async function deleteDealer(dealer: Dealer) {
               </div>
             </div>
             <section v-else-if="activeSection === 'orders'" class="orders-workspace">
-              <div class="orders-hero"><div><span>SİPARİŞ OPERASYONU</span><h2>Siparişleri yönetin</h2><p>Satış hareketlerini inceleyin, ürün detaylarını açın ve belgeleri hazırlayın.</p></div><button class="export-orders" @click="exportOrders">↓ Excel / CSV indir</button></div>
+              <div class="orders-hero"><div><span>SİPARİŞ OPERASYONU</span><h2>Siparişleri yönetin</h2><p>Satış hareketlerini inceleyin, ürün detaylarını açın ve belgeleri hazırlayın.</p></div><button class="export-orders" @click="exportOrders">↓ PDF indir</button></div>
               <div class="order-metrics"><article><span>Toplam sipariş</span><strong>{{ visibleOrders.length }}</strong><small>Filtrelenen kayıt</small></article><article><span>Ürün adedi</span><strong>{{ visibleOrderItems }}</strong><small>Siparişlerdeki toplam</small></article><article><span>Satış tutarı</span><strong>{{ money(visibleOrderSales) }}</strong><small>Filtrelenen ciro</small></article><article class="pending"><span>Aktif operasyon</span><strong>{{ orders.filter(order => !['Tamamlandı', 'İptal', 'Silindi'].includes(order.status)).length }}</strong><small>İşlem bekleyen sipariş</small></article></div>
               <div class="orders-toolbar"><label>⌕<input v-model="search" placeholder="Sipariş no, bayi veya ürün ara..." /></label><div class="filter-pills"><button v-for="filter in orderFilters" :key="filter" :class="{ active: orderFilter === filter }" @click="orderFilter = filter">{{ filter }}</button></div><button title="Siparişleri yenile" class="orders-refresh" @click="refreshData">↻ Yenile</button></div>
               <div class="orders-date-toolbar"><div class="date-pills"><button v-for="filter in dateFilters" :key="filter" :class="{ active: dateFilter === filter }" @click="dateFilter = filter">{{ filter }}</button></div><div v-if="dateFilter === 'Tarih Aralığı'" class="date-range"><label>Başlangıç<input v-model="dateFrom" type="date" /></label><span>→</span><label>Bitiş<input v-model="dateTo" type="date" /></label></div><span class="date-result">{{ visibleOrders.length }} sipariş gösteriliyor</span></div>
@@ -784,20 +857,20 @@ async function deleteDealer(dealer: Dealer) {
             </section>
           </div>
         </section>
-        <div v-if="activeSection === 'products'" class="admin-overlay">
+        <div v-if="activeSection === 'products' || activeSection === 'product-create'" class="admin-overlay product-page">
           <section class="admin-manager product-manager">
-            <button class="manager-close" @click="activeSection = 'overview'">×</button>
+            <button class="manager-close" @click="activeSection = activeSection === 'product-create' ? 'products' : 'overview'">×</button>
             <div class="card-heading">
               <div>
-                <span>ÜRÜN YÖNETİMİ</span>
-                <h2>Ürün kataloğu ve fiyat merkezi</h2>
+                <span>{{ activeSection === 'product-create' ? 'YENİ ÜRÜN' : 'ÜRÜN YÖNETİMİ' }}</span>
+                <h2>{{ activeSection === 'product-create' ? 'Yeni ürün oluştur' : 'Ürün kataloğu ve fiyat merkezi' }}</h2>
                 <p>
                   Ürünleri, üç para birimindeki fiyatları ve stok durumlarını tek yerden yönetin.
                 </p>
               </div>
               <b>{{ products.length }} ürün</b>
             </div>
-            <div class="product-metrics">
+            <div v-if="activeSection === 'products'" class="product-metrics">
               <article>
                 <span>Toplam ürün</span><strong>{{ products.length }}</strong>
               </article>
@@ -813,15 +886,7 @@ async function deleteDealer(dealer: Dealer) {
                 ><strong>{{ products.filter((p) => p.stock === 0).length }}</strong>
               </article>
             </div>
-            <details class="new-product-panel">
-              <summary>
-                <span>＋</span>
-                <div>
-                  <strong>Yeni ürün oluştur</strong
-                  ><small>Ürün bilgilerini, fiyatları ve stok miktarını girin</small>
-                </div>
-                <b>Formu aç</b>
-              </summary>
+            <div v-if="activeSection === 'product-create'" class="new-product-panel">
               <form class="advanced-product-form" @submit.prevent="addProduct">
                 <section class="form-section product-basics">
                   <header><span>1</span><div><strong>Temel bilgiler</strong><small>Ürünün katalogda görünen bilgileri</small></div></header>
@@ -846,10 +911,10 @@ async function deleteDealer(dealer: Dealer) {
                 </section>
                 <footer class="product-form-footer"><div><span>Varsayılan fiyat</span><strong>{{ currencyName(productForm.default_currency) }}</strong><small>{{ productImage ? 'Görsel hazır' : 'Görsel isteğe bağlı' }}</small></div><button :disabled="defaultPriceMissing">＋ Ürünü Kataloğa Ekle</button></footer>
               </form>
-            </details>
+            </div>
             <p v-if="error" class="manager-error">{{ error }}</p>
             <p v-if="success" class="manager-success">✓ {{ success }}</p>
-            <div class="product-list-toolbar">
+            <div v-if="activeSection === 'products'" class="product-list-toolbar">
               <label
                 >⌕<input v-model="productSearch" placeholder="Ürün adı veya kategori ara..."
               /></label>
@@ -870,7 +935,7 @@ async function deleteDealer(dealer: Dealer) {
               </div>
               <span>{{ visibleProducts.length }} sonuç</span>
             </div>
-            <div class="product-admin-list multi-price-list">
+            <div v-if="activeSection === 'products'" class="product-admin-list multi-price-list">
               <article v-for="product in visibleProducts" :key="product.id">
                 <img
                   :src="product.image_url || 'https://placehold.co/90x90?text=NDF'"
@@ -3389,4 +3454,5 @@ header a {
 .order-details>footer{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;background:transparent;border:0;padding:0}.order-details>footer>div{padding:13px;border:1px solid #e5d6b8;border-radius:10px;background:#fff8e9}.order-details>footer span{color:#8b651e;letter-spacing:.7px}.order-details>footer p{color:#56657a;line-height:1.5}.dealer-address-field{grid-column:1/-1}.dealer-form textarea{min-height:82px;padding:11px 12px;border:1px solid #ccd8e8;border-radius:9px;background:#f9fbfe;font:inherit;resize:vertical}.dealer-form textarea:focus{border-color:#2b67b8;outline:0;box-shadow:0 0 0 3px #2b67b815}@media(max-width:700px){.order-details>footer{grid-template-columns:1fr}}
 .shipping-editor{margin:12px 0;padding:14px;display:grid;grid-template-columns:minmax(210px,1.3fr) 1fr 1fr auto;align-items:end;gap:12px;border:1px solid #c9dcf1;border-radius:12px;background:linear-gradient(120deg,#edf5ff,#f8fbff)}.shipping-editor>div{display:flex;align-items:center;gap:10px}.shipping-editor>div>span{width:38px;height:38px;display:grid;place-items:center;border-radius:10px;background:#dcecff;font-size:19px}.shipping-editor p,.shipping-editor label{display:flex;flex-direction:column;gap:4px;margin:0}.shipping-editor p strong{color:#174b89;font-size:12px}.shipping-editor p small,.shipping-editor label{color:#73849a;font-size:9px}.shipping-editor input{height:40px;padding:0 11px;border:1px solid #bfd1e7;border-radius:9px;background:#fff;color:#203b62;outline:0}.shipping-editor input:focus{border-color:#2a67b8;box-shadow:0 0 0 3px #2a67b812}.shipping-editor>button{height:40px;padding:0 15px;border:0;border-radius:9px;background:#2865b5;color:#fff;font-size:10px;font-weight:900;cursor:pointer}.shipping-editor>button:disabled{opacity:.55;cursor:wait}@media(max-width:1000px){.shipping-editor{grid-template-columns:1fr 1fr}.shipping-editor>div{grid-column:1/-1}}@media(max-width:650px){.shipping-editor{grid-template-columns:1fr}.shipping-editor>div{grid-column:auto}}
 .orders-date-toolbar{margin-top:-7px;padding:11px 14px;display:flex;align-items:center;gap:14px;border:1px solid #dce6f2;border-radius:14px;background:#fff;box-shadow:0 7px 22px #16386508}.date-pills{display:flex;gap:6px}.date-pills button{height:36px;padding:0 14px;border:1px solid #d9e3ef;border-radius:9px;background:#f7f9fc;color:#65758d;font-size:10px;font-weight:900;cursor:pointer}.date-pills button.active{border-color:#2865b5;background:#2865b5;color:#fff}.date-range{display:flex;align-items:center;gap:8px}.date-range label{display:flex;align-items:center;gap:7px;color:#74839a;font-size:9px;font-weight:800}.date-range input{width:135px;height:36px;padding:0 9px;border:1px solid #cfdbeb;border-radius:8px;background:#f9fbfe;color:#243d62}.date-result{margin-left:auto;color:#7c899c;font-size:10px;font-weight:800}.order-actions .archive-order{border-color:#efbdc4;background:#fff0f2;color:#b3293e}.order-actions .archive-order:hover{background:#bd3045;color:#fff}.order-status-control.deleted select{border-color:#cad0d9;background:#eff1f4;color:#687385}@media(max-width:900px){.orders-date-toolbar{align-items:stretch;flex-direction:column}.date-pills{overflow:auto}.date-pills button{white-space:nowrap}.date-range{flex-wrap:wrap}.date-result{margin-left:0}.date-range input{width:125px}}
+.product-page.admin-overlay{inset:78px 0 0 255px;padding:0;display:block;background:#f3f6fb;backdrop-filter:none}.product-page .product-manager{width:100%;height:100%;max-height:none;padding:38px 44px;border-radius:0;background:#f3f6fb;box-shadow:none}.product-page .manager-close{position:absolute;z-index:2}.product-page .new-product-panel{border:0;background:transparent;overflow:visible}.product-page .advanced-product-form{padding:0;background:transparent}.top-live-rates{height:46px;padding:6px 10px;display:flex;align-items:center;gap:10px;border:1px solid #d1dfee;border-radius:11px;background:#fff}.top-live-rates>span{display:flex;align-items:baseline;gap:5px;white-space:nowrap}.top-live-rates small{color:#75859b;font-size:8px;font-weight:900}.top-live-rates strong{color:#123b77;font-size:11px}.top-live-rates>i{width:1px;height:22px;background:#dbe4ef}.top-live-rates>em{padding:4px 6px;border-radius:6px;background:#e9f7ef;color:#238052;font-size:7px;font-style:normal;font-weight:900}.top-live-rates.stale>em{background:#fff1d7;color:#a36b0e}@media(min-width:1101px){.product-page.admin-overlay{left:300px}}@media(max-width:1100px){.top-live-rates{display:none}}@media(max-width:900px){.product-page.admin-overlay{inset:0}.product-page .product-manager{padding:75px 16px 24px}.product-page .manager-close{top:15px;right:15px}}
 </style>
