@@ -103,6 +103,9 @@ const dateFilter = ref<'Tümü' | 'Bugün' | 'Bu Ay' | 'Tarih Aralığı'>('Tüm
 const dateFilters = ['Tümü', 'Bugün', 'Bu Ay', 'Tarih Aralığı'] as const
 const dateFrom = ref('')
 const dateTo = ref('')
+const analyticsPeriod = ref<'today' | 'week' | 'month' | 'all' | 'custom'>('month')
+const analyticsFrom = ref('')
+const analyticsTo = ref('')
 const apiUrl = import.meta.env.VITE_API_URL ?? 'https://api.ndf.allspacesoftware.com/api/v1'
 const money = (value: string | number) =>
   new Intl.NumberFormat('tr-TR', { style: 'currency', currency: 'TRY' }).format(Number(value))
@@ -151,6 +154,35 @@ const totalSales = computed(() =>
 )
 const totalItems = computed(() =>
   orders.value.reduce(
+    (sum, order) => sum + order.items.reduce((itemSum, item) => itemSum + item.quantity, 0),
+    0,
+  ),
+)
+const analyticsOrders = computed(() => {
+  const now = new Date()
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const startOfWeek = new Date(startOfToday)
+  startOfWeek.setDate(startOfToday.getDate() - ((startOfToday.getDay() + 6) % 7))
+  const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1)
+  return orders.value.filter((order) => {
+    if (['İptal', 'Silindi'].includes(order.status)) return false
+    const createdAt = new Date(order.created_at)
+    if (analyticsPeriod.value === 'today') return createdAt >= startOfToday
+    if (analyticsPeriod.value === 'week') return createdAt >= startOfWeek
+    if (analyticsPeriod.value === 'month') return createdAt >= startOfMonth
+    if (analyticsPeriod.value === 'custom') {
+      const from = analyticsFrom.value ? new Date(`${analyticsFrom.value}T00:00:00`) : null
+      const to = analyticsTo.value ? new Date(`${analyticsTo.value}T23:59:59.999`) : null
+      return (!from || createdAt >= from) && (!to || createdAt <= to)
+    }
+    return true
+  })
+})
+const analyticsSales = computed(() =>
+  analyticsOrders.value.reduce((sum, order) => sum + Number(order.total_try), 0),
+)
+const analyticsItems = computed(() =>
+  analyticsOrders.value.reduce(
     (sum, order) => sum + order.items.reduce((itemSum, item) => itemSum + item.quantity, 0),
     0,
   ),
@@ -385,6 +417,30 @@ const escapeHtml = (value: unknown) =>
       ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' })[character] ||
       character,
   )
+function exportAnalyticsPdf() {
+  const popup = window.open('', '_blank', 'width=1100,height=850')
+  if (!popup) return void alert('PDF çıktısı için açılır pencereye izin verin.')
+  const periodLabels = {
+    today: 'Günlük',
+    week: 'Haftalık',
+    month: 'Aylık',
+    all: 'Tüm zamanlar',
+    custom: `${analyticsFrom.value || 'Başlangıç'} – ${analyticsTo.value || 'Bugün'}`,
+  }
+  const orderRows = analyticsOrders.value
+    .map(
+      (order) => `<tr><td>#${escapeHtml(order.order_number)}</td><td>${escapeHtml(order.dealer.company)}</td><td>${escapeHtml(date(order.created_at))}</td><td>${escapeHtml(order.items.reduce((sum, item) => sum + item.quantity, 0))}</td><td>${escapeHtml(order.status)}</td><td>${escapeHtml(money(order.total_try))}</td></tr>`,
+    )
+    .join('')
+  const stockRows = products.value
+    .filter((product) => product.stock <= 2)
+    .map((product) => `<tr><td>${escapeHtml(product.name)}</td><td>${escapeHtml(product.category)}</td><td>${product.stock}</td><td>${product.stock === 0 ? 'Stok bitti' : 'Kritik stok'}</td></tr>`)
+    .join('')
+  popup.document.write(
+    `<!doctype html><html lang="tr"><head><meta charset="utf-8"><title>NDF Satış ve Stok Analizi</title><style>@page{size:A4 landscape;margin:14mm}*{box-sizing:border-box}body{margin:0;color:#142b55;font:12px Arial,sans-serif}.header{display:flex;justify-content:space-between;align-items:center;padding-bottom:17px;border-bottom:3px solid #174b95}.logo{padding:10px 14px;border-radius:8px;background:#174b95;color:#fff;font-size:23px;font-weight:900;letter-spacing:4px}.header h1{margin:0;font-size:23px}.header p{margin:5px 0 0;color:#748197}.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:18px 0}.metrics div{padding:13px;border:1px solid #dce4ef;border-radius:8px}.metrics span{display:block;color:#7c899b;font-size:9px}.metrics strong{display:block;margin-top:6px;font-size:17px}h2{margin:22px 0 9px;color:#174b95;font-size:14px}table{width:100%;border-collapse:collapse;table-layout:fixed}th,td{padding:9px 8px;border-bottom:1px solid #e1e7ef;text-align:left;overflow-wrap:anywhere}th{background:#174b95;color:#fff;font-size:9px;text-transform:uppercase}td:last-child,th:last-child{text-align:right}.empty{padding:22px;background:#f5f7fa;color:#7c899b;text-align:center}.footer{margin-top:20px;padding-top:9px;border-top:1px solid #dce3ed;color:#8b96a7;font-size:9px;text-align:center}tr{break-inside:avoid}</style></head><body><div class="header"><div class="logo">NDF</div><div><h1>Satış ve Stok Analizi</h1><p>${escapeHtml(periodLabels[analyticsPeriod.value])} · ${escapeHtml(new Intl.DateTimeFormat('tr-TR', { dateStyle: 'long', timeStyle: 'short' }).format(new Date()))}</p></div></div><div class="metrics"><div><span>DÖNEM CİROSU</span><strong>${escapeHtml(money(analyticsSales.value))}</strong></div><div><span>SİPARİŞ SAYISI</span><strong>${analyticsOrders.value.length}</strong></div><div><span>SATILAN ÜRÜN</span><strong>${analyticsItems.value}</strong></div><div><span>STOK UYARISI</span><strong>${products.value.filter((p) => p.stock <= 2).length}</strong></div></div><h2>Dönem Siparişleri</h2>${orderRows ? `<table><thead><tr><th>Sipariş</th><th>Bayi</th><th>Tarih</th><th>Ürün</th><th>Durum</th><th>Tutar</th></tr></thead><tbody>${orderRows}</tbody></table>` : '<div class="empty">Seçilen dönemde sipariş bulunamadı.</div>'}<h2>Stok Uyarıları</h2>${stockRows ? `<table><thead><tr><th>Ürün</th><th>Kategori</th><th>Stok</th><th>Durum</th></tr></thead><tbody>${stockRows}</tbody></table>` : '<div class="empty">Stok uyarısı bulunmuyor.</div>'}<div class="footer">NDF Makina · Yönetim paneli analiz raporu</div><script>window.onload=()=>setTimeout(()=>window.print(),250)<\/script></body></html>`,
+  )
+  popup.document.close()
+}
 function printOrder(order: Order) {
   const popup = window.open('', '_blank', 'width=900,height=800')
   if (!popup) return void alert('PDF çıktısı için açılır pencereye izin verin.')
@@ -999,8 +1055,8 @@ async function deleteDealer(dealer: Dealer) {
             </div>
           </section>
         </div>
-        <div v-if="activeSection === 'analytics'" class="admin-overlay">
-          <section class="admin-manager">
+        <div v-if="activeSection === 'analytics'" class="admin-overlay product-page analytics-page">
+          <section class="admin-manager product-manager analytics-manager">
             <button class="manager-close" @click="activeSection = 'overview'">×</button>
             <div class="card-heading">
               <div>
@@ -1008,12 +1064,28 @@ async function deleteDealer(dealer: Dealer) {
                 <h2>Satış ve stok analizi</h2>
               </div>
             </div>
+            <div class="analytics-toolbar">
+              <div class="analytics-periods">
+                <button :class="{ active: analyticsPeriod === 'today' }" @click="analyticsPeriod = 'today'">Günlük</button>
+                <button :class="{ active: analyticsPeriod === 'week' }" @click="analyticsPeriod = 'week'">Haftalık</button>
+                <button :class="{ active: analyticsPeriod === 'month' }" @click="analyticsPeriod = 'month'">Aylık</button>
+                <button :class="{ active: analyticsPeriod === 'all' }" @click="analyticsPeriod = 'all'">Tümü</button>
+                <button :class="{ active: analyticsPeriod === 'custom' }" @click="analyticsPeriod = 'custom'">Tarih Seç</button>
+              </div>
+              <div v-if="analyticsPeriod === 'custom'" class="analytics-date-range">
+                <label>Başlangıç<input v-model="analyticsFrom" type="date" /></label>
+                <span>→</span>
+                <label>Bitiş<input v-model="analyticsTo" type="date" /></label>
+              </div>
+              <span class="analytics-result">{{ analyticsOrders.length }} sipariş</span>
+              <button class="analytics-pdf" type="button" @click="exportAnalyticsPdf">↓ PDF indir</button>
+            </div>
             <div class="analytics-grid">
               <article>
-                <span>Toplam Ciro</span><strong>{{ money(totalSales) }}</strong>
+                <span>Dönem Cirosu</span><strong>{{ money(analyticsSales) }}</strong>
               </article>
               <article>
-                <span>Satılan Ürün</span><strong>{{ totalItems }}</strong>
+                <span>Satılan Ürün</span><strong>{{ analyticsItems }}</strong>
               </article>
               <article>
                 <span>Stok Biten</span
@@ -3454,5 +3526,5 @@ header a {
 .order-details>footer{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;background:transparent;border:0;padding:0}.order-details>footer>div{padding:13px;border:1px solid #e5d6b8;border-radius:10px;background:#fff8e9}.order-details>footer span{color:#8b651e;letter-spacing:.7px}.order-details>footer p{color:#56657a;line-height:1.5}.dealer-address-field{grid-column:1/-1}.dealer-form textarea{min-height:82px;padding:11px 12px;border:1px solid #ccd8e8;border-radius:9px;background:#f9fbfe;font:inherit;resize:vertical}.dealer-form textarea:focus{border-color:#2b67b8;outline:0;box-shadow:0 0 0 3px #2b67b815}@media(max-width:700px){.order-details>footer{grid-template-columns:1fr}}
 .shipping-editor{margin:12px 0;padding:14px;display:grid;grid-template-columns:minmax(210px,1.3fr) 1fr 1fr auto;align-items:end;gap:12px;border:1px solid #c9dcf1;border-radius:12px;background:linear-gradient(120deg,#edf5ff,#f8fbff)}.shipping-editor>div{display:flex;align-items:center;gap:10px}.shipping-editor>div>span{width:38px;height:38px;display:grid;place-items:center;border-radius:10px;background:#dcecff;font-size:19px}.shipping-editor p,.shipping-editor label{display:flex;flex-direction:column;gap:4px;margin:0}.shipping-editor p strong{color:#174b89;font-size:12px}.shipping-editor p small,.shipping-editor label{color:#73849a;font-size:9px}.shipping-editor input{height:40px;padding:0 11px;border:1px solid #bfd1e7;border-radius:9px;background:#fff;color:#203b62;outline:0}.shipping-editor input:focus{border-color:#2a67b8;box-shadow:0 0 0 3px #2a67b812}.shipping-editor>button{height:40px;padding:0 15px;border:0;border-radius:9px;background:#2865b5;color:#fff;font-size:10px;font-weight:900;cursor:pointer}.shipping-editor>button:disabled{opacity:.55;cursor:wait}@media(max-width:1000px){.shipping-editor{grid-template-columns:1fr 1fr}.shipping-editor>div{grid-column:1/-1}}@media(max-width:650px){.shipping-editor{grid-template-columns:1fr}.shipping-editor>div{grid-column:auto}}
 .orders-date-toolbar{margin-top:-7px;padding:11px 14px;display:flex;align-items:center;gap:14px;border:1px solid #dce6f2;border-radius:14px;background:#fff;box-shadow:0 7px 22px #16386508}.date-pills{display:flex;gap:6px}.date-pills button{height:36px;padding:0 14px;border:1px solid #d9e3ef;border-radius:9px;background:#f7f9fc;color:#65758d;font-size:10px;font-weight:900;cursor:pointer}.date-pills button.active{border-color:#2865b5;background:#2865b5;color:#fff}.date-range{display:flex;align-items:center;gap:8px}.date-range label{display:flex;align-items:center;gap:7px;color:#74839a;font-size:9px;font-weight:800}.date-range input{width:135px;height:36px;padding:0 9px;border:1px solid #cfdbeb;border-radius:8px;background:#f9fbfe;color:#243d62}.date-result{margin-left:auto;color:#7c899c;font-size:10px;font-weight:800}.order-actions .archive-order{border-color:#efbdc4;background:#fff0f2;color:#b3293e}.order-actions .archive-order:hover{background:#bd3045;color:#fff}.order-status-control.deleted select{border-color:#cad0d9;background:#eff1f4;color:#687385}@media(max-width:900px){.orders-date-toolbar{align-items:stretch;flex-direction:column}.date-pills{overflow:auto}.date-pills button{white-space:nowrap}.date-range{flex-wrap:wrap}.date-result{margin-left:0}.date-range input{width:125px}}
-.product-page.admin-overlay{inset:78px 0 0 255px;padding:0;display:block;background:#f3f6fb;backdrop-filter:none}.product-page .product-manager{width:100%;height:100%;max-height:none;padding:38px 44px;border-radius:0;background:#f3f6fb;box-shadow:none}.product-page .manager-close{position:absolute;z-index:2}.product-page .new-product-panel{border:0;background:transparent;overflow:visible}.product-page .advanced-product-form{padding:0;background:transparent}.top-live-rates{height:46px;padding:6px 10px;display:flex;align-items:center;gap:10px;border:1px solid #d1dfee;border-radius:11px;background:#fff}.top-live-rates>span{display:flex;align-items:baseline;gap:5px;white-space:nowrap}.top-live-rates small{color:#75859b;font-size:8px;font-weight:900}.top-live-rates strong{color:#123b77;font-size:11px}.top-live-rates>i{width:1px;height:22px;background:#dbe4ef}.top-live-rates>em{padding:4px 6px;border-radius:6px;background:#e9f7ef;color:#238052;font-size:7px;font-style:normal;font-weight:900}.top-live-rates.stale>em{background:#fff1d7;color:#a36b0e}@media(min-width:1101px){.product-page.admin-overlay{left:300px}}@media(max-width:1100px){.top-live-rates{display:none}}@media(max-width:900px){.product-page.admin-overlay{inset:0}.product-page .product-manager{padding:75px 16px 24px}.product-page .manager-close{top:15px;right:15px}}
+.product-page.admin-overlay{inset:78px 0 0 255px;padding:0;display:block;background:#f3f6fb;backdrop-filter:none}.product-page .product-manager{width:100%;height:100%;max-height:none;padding:38px 44px;border-radius:0;background:#f3f6fb;box-shadow:none}.product-page .manager-close{position:absolute;z-index:2}.product-page .new-product-panel{border:0;background:transparent;overflow:visible}.product-page .advanced-product-form{padding:0;background:transparent}.top-live-rates{height:46px;padding:6px 10px;display:flex;align-items:center;gap:10px;border:1px solid #d1dfee;border-radius:11px;background:#fff}.top-live-rates>span{display:flex;align-items:baseline;gap:5px;white-space:nowrap}.top-live-rates small{color:#75859b;font-size:8px;font-weight:900}.top-live-rates strong{color:#123b77;font-size:11px}.top-live-rates>i{width:1px;height:22px;background:#dbe4ef}.top-live-rates>em{padding:4px 6px;border-radius:6px;background:#e9f7ef;color:#238052;font-size:7px;font-style:normal;font-weight:900}.top-live-rates.stale>em{background:#fff1d7;color:#a36b0e}.analytics-toolbar{margin-bottom:18px;padding:12px 14px;display:flex;align-items:center;gap:14px;border:1px solid #d9e4f1;border-radius:14px;background:#fff}.analytics-periods{display:flex;gap:7px}.analytics-periods button{height:38px;padding:0 15px;border:1px solid #d6e0ec;border-radius:9px;background:#f7f9fc;color:#64738a;font-size:10px;font-weight:900;cursor:pointer}.analytics-periods button.active{border-color:#2865b5;background:#2865b5;color:#fff}.analytics-date-range{display:flex;align-items:center;gap:8px}.analytics-date-range label{display:flex;align-items:center;gap:7px;color:#6d7d94;font-size:9px;font-weight:800}.analytics-date-range input{width:135px;height:38px;padding:0 9px;border:1px solid #cbd9e9;border-radius:8px;background:#f9fbfe;color:#203d64}.analytics-result{margin-left:auto;color:#748399;font-size:10px;font-weight:900}.analytics-pdf{height:38px;padding:0 14px;border:0;border-radius:9px;background:#174e95;color:#fff;font-size:10px;font-weight:900;cursor:pointer;white-space:nowrap}.analytics-pdf:hover{background:#0e3972}@media(min-width:1101px){.product-page.admin-overlay{left:300px}}@media(max-width:1100px){.top-live-rates{display:none}.analytics-toolbar{align-items:stretch;flex-direction:column}.analytics-result{margin-left:0}.analytics-periods{overflow:auto}.analytics-periods button{white-space:nowrap}}@media(max-width:900px){.product-page.admin-overlay{inset:0}.product-page .product-manager{padding:75px 16px 24px}.product-page .manager-close{top:15px;right:15px}}@media(max-width:650px){.analytics-date-range{align-items:stretch;flex-direction:column}.analytics-date-range>span{display:none}.analytics-date-range label{justify-content:space-between}.analytics-grid{grid-template-columns:1fr 1fr}}
 </style>
