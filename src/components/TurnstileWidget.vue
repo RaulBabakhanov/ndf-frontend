@@ -11,7 +11,7 @@ declare global {
   interface Window { turnstile?: TurnstileApi }
 }
 
-const props = defineProps<{ siteKey: string }>()
+const props = withDefaults(defineProps<{ siteKey: string; showLabel?: boolean }>(), { showLabel: true })
 const emit = defineEmits<{ verified: [token: string] }>()
 const container = ref<HTMLElement | null>(null)
 const loadError = ref(false)
@@ -70,7 +70,7 @@ onBeforeUnmount(() => { if (widgetId && window.turnstile) window.turnstile.remov
   <div class="captcha-shell">
     <div ref="container"></div>
     <p v-if="loadError">Güvenlik doğrulaması yüklenemedi. İnternet bağlantınızı kontrol edin.</p>
-    <small v-else>🔒 Güvenli bot doğrulaması</small>
+    <small v-else-if="showLabel">🔒 Güvenli bot doğrulaması</small>
   </div>
 </template>
 

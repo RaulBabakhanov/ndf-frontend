@@ -10,6 +10,7 @@ interface Dealer {
   phone: string
   city: string
   address: string
+  tax_number: string
   discount_percent: string
   is_approved: boolean
   created_at: string
@@ -90,6 +91,9 @@ const deletingProductId = ref<number | null>(null)
 const savingOrderStatusId = ref<number | null>(null)
 const savingShippingId = ref<number | null>(null)
 const deletingDealerId = ref<number | null>(null)
+const savingDealerId = ref<number | null>(null)
+const editingDealer = ref<Dealer | null>(null)
+const sidebarCollapsed = ref(localStorage.getItem('ndfAdminSidebarCollapsed') === 'true')
 const expandedOrderId = ref<number | null>(null)
 const success = ref('')
 const exchangeRates = ref({ usd: '', eur: '', publishedAt: '', source: 'TCMB', stale: false })
@@ -610,6 +614,42 @@ async function deleteDealer(dealer: Dealer) {
   deletingDealerId.value = null
   success.value = `${dealer.company} silindi.`
 }
+function toggleSidebar() {
+  sidebarCollapsed.value = !sidebarCollapsed.value
+  localStorage.setItem('ndfAdminSidebarCollapsed', String(sidebarCollapsed.value))
+}
+function openDealerEditor(dealer: Dealer) {
+  editingDealer.value = { ...dealer }
+  error.value = ''
+  success.value = ''
+}
+async function saveDealer() {
+  if (!editingDealer.value) return
+  error.value = ''
+  savingDealerId.value = editingDealer.value.id
+  const dealer = editingDealer.value
+  const response = await fetch(`${apiUrl}/admin/dealers/${dealer.id}`, {
+    method: 'PATCH',
+    headers: { ...adminHeaders(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      company: dealer.company,
+      official: dealer.official,
+      tax_number: dealer.tax_number,
+      city: dealer.city,
+      address: dealer.address,
+      phone: dealer.phone,
+      email: dealer.email,
+    }),
+  })
+  savingDealerId.value = null
+  if (!response.ok)
+    return void (error.value =
+      (await response.json().catch(() => ({}))).detail || 'Bayi bilgileri güncellenemedi.')
+  const company = dealer.company
+  editingDealer.value = null
+  await refreshData()
+  success.value = `${company} bilgileri güncellendi.`
+}
 </script>
 
 <template>
@@ -617,20 +657,6 @@ async function deleteDealer(dealer: Dealer) {
     <section v-if="!authenticated" class="admin-login">
       <aside class="brand-panel">
         <div class="brand-logo">NDF</div>
-        <div class="brand-copy">
-          <span>NDF MAKİNA</span>
-          <h2>Gücün ve güvenin yönetim merkezi.</h2>
-          <p>
-            Bayilerinizi, siparişlerinizi ve tüm satış hareketlerinizi tek bir güçlü panelden
-            yönetin.
-          </p>
-        </div>
-        <div class="brand-features">
-          <div><b>01</b><span>Anlık satış takibi</span></div>
-          <div><b>02</b><span>Merkezi bayi yönetimi</span></div>
-          <div><b>03</b><span>Güvenli veri erişimi</span></div>
-        </div>
-        <small>© NDF Makina Yönetim Sistemi</small>
       </aside>
       <div class="login-form-panel">
         <div class="login-brand">
@@ -656,6 +682,7 @@ async function deleteDealer(dealer: Dealer) {
           <TurnstileWidget
             ref="adminCaptcha"
             :site-key="turnstileSiteKey"
+            :show-label="false"
             @verified="adminTurnstileToken = $event"
           />
           <button :disabled="loading || !adminTurnstileToken">
@@ -664,12 +691,12 @@ async function deleteDealer(dealer: Dealer) {
           </button>
         </form>
         <em v-if="error">⚠ {{ error }}</em>
-        <footer><span>🔒</span> Yetkisiz erişimler kayıt altına alınır.</footer>
       </div>
     </section>
     <template v-else>
-      <div class="dashboard-layout">
+      <div :class="['dashboard-layout', { 'sidebar-collapsed': sidebarCollapsed }]">
         <aside class="dashboard-sidebar">
+          <button class="sidebar-toggle" :title="sidebarCollapsed ? 'Menüyü aç' : 'Menüyü kapat'" @click="toggleSidebar">{{ sidebarCollapsed ? '›' : '‹' }}</button>
           <div class="side-brand">
             <b>NDF</b><span><strong>Yönetim</strong><small>Admin merkezi</small></span>
           </div>
@@ -892,13 +919,11 @@ async function deleteDealer(dealer: Dealer) {
                       step="0.01"
                     /><button @click="saveDealerDiscount(dealer)">Kaydet</button></span
                   ><span>{{ date(dealer.created_at) }}</span
-                  ><button
-                    class="delete-dealer"
-                    :disabled="deletingDealerId === dealer.id"
-                    @click="deleteDealer(dealer)"
-                  >
-                    {{ deletingDealerId === dealer.id ? 'Siliniyor…' : 'Sil' }}
-                  </button>
+                  ><div class="dealer-row-actions"><button class="edit-dealer" @click="openDealerEditor(dealer)">Düzenle</button><button
+                      class="delete-dealer"
+                      :disabled="deletingDealerId === dealer.id"
+                      @click="deleteDealer(dealer)"
+                    >{{ deletingDealerId === dealer.id ? 'Siliniyor…' : 'Sil' }}</button></div>
                 </div>
               </div>
               <div v-else class="smart-empty">
@@ -1132,6 +1157,23 @@ async function deleteDealer(dealer: Dealer) {
               ><label
                 >Geçici şifre<input v-model="dealerForm.password" required minlength="8" /></label
               ><button>＋ Cari Hesabı Oluştur</button>
+            </form>
+            <p v-if="error" class="manager-error">{{ error }}</p>
+          </section>
+        </div>
+        <div v-if="editingDealer" class="admin-overlay dealer-edit-overlay">
+          <section class="admin-manager dealer-manager">
+            <button class="manager-close" @click="editingDealer = null">×</button>
+            <div class="card-heading"><div><span>BAYİ YÖNETİMİ</span><h2>Bayi bilgilerini düzenle</h2></div></div>
+            <form class="dealer-form" @submit.prevent="saveDealer">
+              <label>Firma unvanı<input v-model.trim="editingDealer.company" required minlength="2" /></label>
+              <label>Yetkili kişi<input v-model.trim="editingDealer.official" required minlength="2" /></label>
+              <label>Vergi numarası<input v-model.trim="editingDealer.tax_number" required pattern="\d{10,11}" /></label>
+              <label>Şehir<input v-model.trim="editingDealer.city" required /></label>
+              <label>Telefon<input v-model.trim="editingDealer.phone" required /></label>
+              <label>E-posta<input v-model.trim="editingDealer.email" required type="email" /></label>
+              <label class="dealer-address-field">Açık adres<textarea v-model.trim="editingDealer.address" maxlength="500"></textarea></label>
+              <button :disabled="savingDealerId === editingDealer.id">{{ savingDealerId === editingDealer.id ? 'Kaydediliyor…' : 'Değişiklikleri Kaydet' }}</button>
             </form>
             <p v-if="error" class="manager-error">{{ error }}</p>
           </section>
@@ -3527,4 +3569,10 @@ header a {
 .shipping-editor{margin:12px 0;padding:14px;display:grid;grid-template-columns:minmax(210px,1.3fr) 1fr 1fr auto;align-items:end;gap:12px;border:1px solid #c9dcf1;border-radius:12px;background:linear-gradient(120deg,#edf5ff,#f8fbff)}.shipping-editor>div{display:flex;align-items:center;gap:10px}.shipping-editor>div>span{width:38px;height:38px;display:grid;place-items:center;border-radius:10px;background:#dcecff;font-size:19px}.shipping-editor p,.shipping-editor label{display:flex;flex-direction:column;gap:4px;margin:0}.shipping-editor p strong{color:#174b89;font-size:12px}.shipping-editor p small,.shipping-editor label{color:#73849a;font-size:9px}.shipping-editor input{height:40px;padding:0 11px;border:1px solid #bfd1e7;border-radius:9px;background:#fff;color:#203b62;outline:0}.shipping-editor input:focus{border-color:#2a67b8;box-shadow:0 0 0 3px #2a67b812}.shipping-editor>button{height:40px;padding:0 15px;border:0;border-radius:9px;background:#2865b5;color:#fff;font-size:10px;font-weight:900;cursor:pointer}.shipping-editor>button:disabled{opacity:.55;cursor:wait}@media(max-width:1000px){.shipping-editor{grid-template-columns:1fr 1fr}.shipping-editor>div{grid-column:1/-1}}@media(max-width:650px){.shipping-editor{grid-template-columns:1fr}.shipping-editor>div{grid-column:auto}}
 .orders-date-toolbar{margin-top:-7px;padding:11px 14px;display:flex;align-items:center;gap:14px;border:1px solid #dce6f2;border-radius:14px;background:#fff;box-shadow:0 7px 22px #16386508}.date-pills{display:flex;gap:6px}.date-pills button{height:36px;padding:0 14px;border:1px solid #d9e3ef;border-radius:9px;background:#f7f9fc;color:#65758d;font-size:10px;font-weight:900;cursor:pointer}.date-pills button.active{border-color:#2865b5;background:#2865b5;color:#fff}.date-range{display:flex;align-items:center;gap:8px}.date-range label{display:flex;align-items:center;gap:7px;color:#74839a;font-size:9px;font-weight:800}.date-range input{width:135px;height:36px;padding:0 9px;border:1px solid #cfdbeb;border-radius:8px;background:#f9fbfe;color:#243d62}.date-result{margin-left:auto;color:#7c899c;font-size:10px;font-weight:800}.order-actions .archive-order{border-color:#efbdc4;background:#fff0f2;color:#b3293e}.order-actions .archive-order:hover{background:#bd3045;color:#fff}.order-status-control.deleted select{border-color:#cad0d9;background:#eff1f4;color:#687385}@media(max-width:900px){.orders-date-toolbar{align-items:stretch;flex-direction:column}.date-pills{overflow:auto}.date-pills button{white-space:nowrap}.date-range{flex-wrap:wrap}.date-result{margin-left:0}.date-range input{width:125px}}
 .product-page.admin-overlay{inset:78px 0 0 255px;padding:0;display:block;background:#f3f6fb;backdrop-filter:none}.product-page .product-manager{width:100%;height:100%;max-height:none;padding:38px 44px;border-radius:0;background:#f3f6fb;box-shadow:none}.product-page .manager-close{position:absolute;z-index:2}.product-page .new-product-panel{border:0;background:transparent;overflow:visible}.product-page .advanced-product-form{padding:0;background:transparent}.top-live-rates{height:46px;padding:6px 10px;display:flex;align-items:center;gap:10px;border:1px solid #d1dfee;border-radius:11px;background:#fff}.top-live-rates>span{display:flex;align-items:baseline;gap:5px;white-space:nowrap}.top-live-rates small{color:#75859b;font-size:8px;font-weight:900}.top-live-rates strong{color:#123b77;font-size:11px}.top-live-rates>i{width:1px;height:22px;background:#dbe4ef}.top-live-rates>em{padding:4px 6px;border-radius:6px;background:#e9f7ef;color:#238052;font-size:7px;font-style:normal;font-weight:900}.top-live-rates.stale>em{background:#fff1d7;color:#a36b0e}.analytics-toolbar{margin-bottom:18px;padding:12px 14px;display:flex;align-items:center;gap:14px;border:1px solid #d9e4f1;border-radius:14px;background:#fff}.analytics-periods{display:flex;gap:7px}.analytics-periods button{height:38px;padding:0 15px;border:1px solid #d6e0ec;border-radius:9px;background:#f7f9fc;color:#64738a;font-size:10px;font-weight:900;cursor:pointer}.analytics-periods button.active{border-color:#2865b5;background:#2865b5;color:#fff}.analytics-date-range{display:flex;align-items:center;gap:8px}.analytics-date-range label{display:flex;align-items:center;gap:7px;color:#6d7d94;font-size:9px;font-weight:800}.analytics-date-range input{width:135px;height:38px;padding:0 9px;border:1px solid #cbd9e9;border-radius:8px;background:#f9fbfe;color:#203d64}.analytics-result{margin-left:auto;color:#748399;font-size:10px;font-weight:900}.analytics-pdf{height:38px;padding:0 14px;border:0;border-radius:9px;background:#174e95;color:#fff;font-size:10px;font-weight:900;cursor:pointer;white-space:nowrap}.analytics-pdf:hover{background:#0e3972}@media(min-width:1101px){.product-page.admin-overlay{left:300px}}@media(max-width:1100px){.top-live-rates{display:none}.analytics-toolbar{align-items:stretch;flex-direction:column}.analytics-result{margin-left:0}.analytics-periods{overflow:auto}.analytics-periods button{white-space:nowrap}}@media(max-width:900px){.product-page.admin-overlay{inset:0}.product-page .product-manager{padding:75px 16px 24px}.product-page .manager-close{top:15px;right:15px}}@media(max-width:650px){.analytics-date-range{align-items:stretch;flex-direction:column}.analytics-date-range>span{display:none}.analytics-date-range label{justify-content:space-between}.analytics-grid{grid-template-columns:1fr 1fr}}
+.brand-panel{align-items:center}.brand-logo{margin:auto;transform:scale(1.15)}
+.sidebar-toggle{position:absolute;z-index:4;top:22px;right:-15px;width:30px;height:30px;border:2px solid #f5f7fb;border-radius:50%;background:#2870c5;color:#fff;font-size:20px;line-height:1;cursor:pointer;box-shadow:0 5px 15px #09265735}.dashboard-layout,.dashboard-sidebar{transition:.25s ease}.dashboard-layout.sidebar-collapsed{grid-template-columns:84px 1fr}.sidebar-collapsed .dashboard-sidebar{padding-left:12px;padding-right:12px}.sidebar-collapsed .side-brand{justify-content:center;padding-left:0;padding-right:0}.sidebar-collapsed .side-brand>span,.sidebar-collapsed .dashboard-sidebar nav>small,.sidebar-collapsed .dashboard-sidebar nav button:not(.active)>b,.sidebar-collapsed .dashboard-sidebar nav button>b,.sidebar-collapsed .side-user>div,.sidebar-collapsed .side-user>button{display:none}.sidebar-collapsed .dashboard-sidebar nav button,.sidebar-collapsed .dashboard-sidebar nav a{justify-content:center;padding:0;font-size:0}.sidebar-collapsed .dashboard-sidebar nav button>span{width:auto;font-size:19px}.sidebar-collapsed .side-user{justify-content:center;padding:9px}.sidebar-collapsed .product-page.admin-overlay{left:84px}
+.dealer-row-actions{display:flex;align-items:center;gap:6px}.dealer-row-actions button{height:34px;padding:0 9px;border-radius:8px;font-size:9px;font-weight:900;cursor:pointer}.edit-dealer{border:1px solid #b9d2ef;background:#edf5ff;color:#205da7}.dealer-row-actions .delete-dealer{border:1px solid #efc3c9;background:#fff1f2;color:#b72e42}.dealer-edit-overlay{z-index:1300}.dealer-edit-overlay .dealer-manager{max-width:840px}
+.order-main{grid-template-columns:50px minmax(190px,1.15fr) minmax(220px,1.4fr) minmax(125px,.7fr) minmax(110px,.65fr) 128px minmax(190px,auto)}.order-status-control,.order-actions{align-self:end}.order-actions{flex-wrap:nowrap}.order-actions button{white-space:nowrap}
+@media(max-width:1200px){.sidebar-collapsed .product-page.admin-overlay{left:84px}.order-main{grid-template-columns:48px 1.1fr 1.35fr .75fr minmax(180px,auto)}}
+@media(max-width:900px){.sidebar-toggle{display:none}.dashboard-layout.sidebar-collapsed{grid-template-columns:1fr}.sidebar-collapsed .dashboard-sidebar{padding:10px 16px}.sidebar-collapsed .side-brand>span,.sidebar-collapsed .dashboard-sidebar nav button>b,.sidebar-collapsed .side-user>div,.sidebar-collapsed .side-user>button{display:flex}.sidebar-collapsed .dashboard-sidebar nav button,.sidebar-collapsed .dashboard-sidebar nav a{justify-content:flex-start;padding:0 12px;font-size:11px}.sidebar-collapsed .dashboard-sidebar nav button>span{width:22px}.sidebar-collapsed .product-page.admin-overlay{left:0}}
 </style>
