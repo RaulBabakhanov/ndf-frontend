@@ -82,6 +82,10 @@ type AccountTab = 'products' | 'orders' | 'payments' | 'profile' | 'online-payme
 const storedTab = localStorage.getItem('ndfActiveTab') as AccountTab | null
 const activeTab = ref<AccountTab>(storedTab || 'products')
 const paymentNotice = ref('')
+const profileEditing = ref(false)
+const profileNotice = ref('')
+const profileSaving = ref(false)
+const profileForm = reactive({ company: '', official: '', city: '', address: '', phone: '' })
 const paymentAmount = ref<number | null>(null)
 const paymentCurrency = ref<'TRY' | 'USD'>('TRY')
 const cardForm = reactive({ holder: '', number: '', expiry: '', cvc: '', installment: 'Tek çekim' })
@@ -207,6 +211,37 @@ function applyAuth(auth: AuthDto) {
   deliveryAddress.value = dealer.address
   localStorage.setItem('ndfAccessToken', auth.access_token)
   localStorage.setItem('ndfDealerSession', JSON.stringify(dealer))
+}
+function beginProfileEdit() {
+  if (!currentDealer.value) return
+  profileForm.company = currentDealer.value.company
+  profileForm.official = currentDealer.value.official
+  profileForm.city = currentDealer.value.city
+  profileForm.address = currentDealer.value.address
+  profileForm.phone = currentDealer.value.phone
+  profileNotice.value = ''
+  profileEditing.value = true
+}
+async function saveProfile() {
+  if (!currentDealer.value) return
+  profileSaving.value = true
+  profileNotice.value = ''
+  try {
+    const dealer = await api.updateMe({ ...profileForm })
+    currentDealer.value.company = dealer.company
+    currentDealer.value.official = dealer.official
+    currentDealer.value.city = dealer.city
+    currentDealer.value.address = dealer.address || ''
+    currentDealer.value.phone = dealer.phone
+    deliveryAddress.value = currentDealer.value.address
+    localStorage.setItem('ndfDealerSession', JSON.stringify(currentDealer.value))
+    profileEditing.value = false
+    profileNotice.value = 'Firma bilgileriniz başarıyla güncellendi.'
+  } catch (error) {
+    profileNotice.value = error instanceof ApiError ? error.message : 'Bilgiler güncellenemedi.'
+  } finally {
+    profileSaving.value = false
+  }
 }
 onMounted(async () => {
   try { await loadExchangeRates() } catch { /* API ulaşılamazsa güvenli yedek kur kullanılır. */ }
@@ -456,8 +491,9 @@ function logout() {
         </section>
 
         <section v-else-if="activeTab === 'profile'" class="portal-page">
-          <div class="page-title"><div><span>BAYİ HESABI</span><h2>Firma Profili</h2><p>Firma ve iletişim bilgilerinizi görüntüleyin.</p></div><button>Bilgileri düzenle</button></div>
-          <div class="profile-layout"><div class="profile-company"><span>{{ currentDealer.company.charAt(0).toUpperCase() }}</span><h3>{{ currentDealer.company }}</h3><p>Onaylı NDF Bayisi</p><em>✓ Aktif hesap</em></div><div class="profile-details"><h3>Firma Bilgileri</h3><dl><div><dt>Firma unvanı</dt><dd>{{ currentDealer.company }}</dd></div><div><dt>Yetkili kişi</dt><dd>{{ currentDealer.official }}</dd></div><div><dt>E-posta</dt><dd>{{ currentDealer.email }}</dd></div><div><dt>Telefon</dt><dd>{{ currentDealer.phone }}</dd></div><div><dt>Şehir</dt><dd>{{ currentDealer.city }}</dd></div><div><dt>Vergi numarası</dt><dd>{{ currentDealer.taxNumber }}</dd></div><div class="profile-address"><dt>Açık adres</dt><dd>{{ currentDealer.address || 'Henüz adres girilmedi' }}</dd></div></dl></div></div>
+          <div class="page-title"><div><span>BAYİ HESABI</span><h2>Firma Profili</h2><p>Firma ve iletişim bilgilerinizi görüntüleyin.</p></div><button v-if="!profileEditing" @click="beginProfileEdit">Bilgileri düzenle</button></div>
+          <p v-if="profileNotice" :class="['profile-notice', { error: profileNotice.includes('güncellenemedi') }]">{{ profileNotice }}</p>
+          <div class="profile-layout"><div class="profile-company"><span>{{ currentDealer.company.charAt(0).toUpperCase() }}</span><h3>{{ currentDealer.company }}</h3><p>Onaylı NDF Bayisi</p><em>✓ Aktif hesap</em></div><div class="profile-details"><template v-if="!profileEditing"><h3>Firma Bilgileri</h3><dl><div><dt>Firma unvanı</dt><dd>{{ currentDealer.company }}</dd></div><div><dt>Yetkili kişi</dt><dd>{{ currentDealer.official }}</dd></div><div><dt>E-posta</dt><dd>{{ currentDealer.email }}</dd></div><div><dt>Telefon</dt><dd>{{ currentDealer.phone }}</dd></div><div><dt>Şehir</dt><dd>{{ currentDealer.city }}</dd></div><div><dt>Vergi numarası</dt><dd>{{ currentDealer.taxNumber }}</dd></div><div class="profile-address"><dt>Açık adres</dt><dd>{{ currentDealer.address || 'Henüz adres girilmedi' }}</dd></div></dl></template><form v-else class="profile-edit-form" @submit.prevent="saveProfile"><div class="profile-edit-heading"><div><h3>Firma Bilgilerini Düzenle</h3><p>E-posta ve vergi numarası yalnızca yönetici tarafından değiştirilebilir.</p></div><button type="button" @click="profileEditing = false">Vazgeç</button></div><div class="profile-edit-grid"><label>Firma unvanı<input v-model.trim="profileForm.company" required minlength="2" /></label><label>Yetkili kişi<input v-model.trim="profileForm.official" required minlength="2" /></label><label>Telefon<input v-model.trim="profileForm.phone" required minlength="10" /></label><label>Şehir<input v-model.trim="profileForm.city" required minlength="2" /></label><label class="profile-edit-address">Açık adres<textarea v-model.trim="profileForm.address" maxlength="500"></textarea></label></div><div class="profile-readonly"><span><small>E-posta</small>{{ currentDealer.email }}</span><span><small>Vergi numarası</small>{{ currentDealer.taxNumber }}</span></div><button class="profile-save" :disabled="profileSaving">{{ profileSaving ? 'Kaydediliyor…' : 'Değişiklikleri kaydet' }}</button></form></div></div>
         </section>
 
         <section v-else class="portal-page online-payment-page">
@@ -557,4 +593,7 @@ textarea{width:100%;min-height:88px;padding:13px 14px;border:1px solid #d9e0ec;b
 .portal-account-actions{display:flex;align-items:center;gap:8px}.portal-user{min-width:175px;padding:7px 10px;border:1px solid #e0e8f3;border-radius:13px;background:#f8fbff;text-align:left;transition:.2s}.portal-user:hover{border-color:#aec8ec;background:#eef5ff;transform:translateY(-1px)}.portal-user>b{margin-left:auto;color:#376cb5;font-size:18px}.header-cart{min-width:170px;padding:8px 10px;display:flex;align-items:center;gap:9px;border:1px solid #d7e4f3;border-radius:13px;background:#f6faff;color:#173868;text-align:left;cursor:pointer;transition:.2s}.header-cart:hover{border-color:#8db4e5;background:#eaf3ff}.header-cart>span{width:34px;height:34px;display:grid;place-items:center;border-radius:9px;background:#dfeeff}.header-cart>div{min-width:0;display:flex;flex:1;flex-direction:column}.header-cart strong{font-size:11px}.header-cart small{margin-top:3px;max-width:115px;overflow:hidden;color:#71829a;font-size:8px;text-overflow:ellipsis;white-space:nowrap}.header-cart>b{min-width:21px;height:21px;padding:0 5px;display:grid;place-items:center;border-radius:11px;background:#245fae;color:#fff;font-size:8px}.portal-logout{width:36px;height:36px;border:0;border-radius:10px;background:#eef2f7;color:#51627b;cursor:pointer}.portal-logout:hover{background:#ffecef;color:#b52f43}.category-picker{position:relative;width:230px;height:100%;flex:0 0 auto;border-left:1px solid #e0e6ef}.category-picker>button{width:100%!important;height:100%;padding:0 16px!important;display:flex;align-items:center;justify-content:space-between;border:0!important;background:#fff!important;color:#344660!important;text-align:left}.category-picker>button span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.category-picker-menu{position:absolute;z-index:80;top:calc(100% + 7px);right:0;width:330px;max-height:310px;padding:6px;overflow-y:auto;border:1px solid #d5e0ee;border-radius:12px;background:#fff;box-shadow:0 18px 45px #102d6840}.category-picker-menu button{width:100%!important;min-height:38px;padding:8px 11px!important;display:block;border:0!important;border-radius:8px;background:#fff!important;color:#42536c!important;text-align:left;font-size:11px;font-weight:700}.category-picker-menu button:hover,.category-picker-menu button.active{background:#eaf3ff!important;color:#1f5ca8!important}.search-bar>.category-picker+button{align-self:stretch;width:90px;border:0;background:#20a5df;color:#fff;font-weight:800;cursor:pointer}
 @media(max-width:1100px){.portal-account-actions{gap:5px}.portal-user{min-width:0}.portal-user div,.header-cart div{display:none}.header-cart{min-width:0}.portal-header{gap:14px}}
 @media(max-width:750px){.portal-account-actions{margin-left:auto}.portal-user>span{display:grid}.portal-user{width:44px;padding:4px}.portal-user>b{display:none}.header-cart{position:relative;width:44px;padding:4px}.header-cart>b{position:absolute;right:-3px;top:-3px}.portal-logout{width:34px}.category-picker{width:125px}.category-picker-menu{right:-58px;width:min(330px,calc(100vw - 28px))}.search-bar>.category-picker+button{width:58px}}
+.dealer-portal .portal-header{min-height:82px}.portal-user{min-width:215px;padding:10px 13px;border-radius:15px}.portal-user>span{width:44px;height:44px;border-radius:12px;font-size:15px}.portal-user strong{font-size:13px}.portal-user small{font-size:10px}.header-cart{min-width:210px;padding:10px 13px;border-radius:15px}.header-cart>span{width:44px;height:44px;border-radius:12px;font-size:18px}.header-cart strong{font-size:13px}.header-cart small{max-width:145px;font-size:9px}.portal-logout{width:44px;height:44px;font-size:16px}.profile-notice{max-width:1370px;margin:-12px auto 20px;padding:12px 15px;border:1px solid #b9e2ca;border-radius:10px;background:#eaf8f0;color:#23764a;font-size:12px;font-weight:700}.profile-notice.error{border-color:#efc5cb;background:#fff0f2;color:#b42f42}.profile-edit-form{display:flex;flex-direction:column;gap:20px}.profile-edit-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:20px}.profile-edit-heading h3{margin:0 0 5px}.profile-edit-heading p{margin:0;color:#7d899b;font-size:11px}.profile-edit-heading>button{padding:8px 11px;border:1px solid #d6dfeb;border-radius:8px;background:#f6f8fb;color:#586a82;font-weight:700;cursor:pointer}.profile-edit-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.profile-edit-grid label{display:flex;flex-direction:column;gap:7px;color:#53647c;font-size:10px;font-weight:800}.profile-edit-grid input{height:46px;padding:0 12px;border:1px solid #ccd8e7;border-radius:9px;background:#f9fbfe;outline:0}.profile-edit-grid input:focus,.profile-edit-grid textarea:focus{border-color:#2c66b6;box-shadow:0 0 0 3px #2c66b615}.profile-edit-address{grid-column:1/-1}.profile-readonly{display:grid;grid-template-columns:1fr 1fr;gap:12px}.profile-readonly span{padding:12px;border:1px solid #e0e6ee;border-radius:9px;background:#f5f7fa;color:#4b5b72;font-size:12px}.profile-readonly small{display:block;margin-bottom:5px;color:#8b96a7;font-size:8px;text-transform:uppercase}.profile-save{align-self:flex-end;min-width:210px;height:46px;border:0;border-radius:10px;background:#285fb2;color:#fff;font-weight:800;cursor:pointer}.profile-save:disabled{opacity:.55;cursor:wait}
+@media(max-width:1100px){.dealer-portal .portal-header{min-height:74px}.portal-user,.header-cart{min-width:54px}.portal-user>span,.header-cart>span{width:42px;height:42px}}
+@media(max-width:650px){.profile-edit-grid,.profile-readonly{grid-template-columns:1fr}.profile-edit-address{grid-column:auto}.profile-save{width:100%}.dealer-portal .portal-header{min-height:66px}}
 </style>

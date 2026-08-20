@@ -95,6 +95,8 @@ export const api = {
   register: (payload: Record<string, string>) => request<RegistrationDto>('/auth/register', { method: 'POST', body: JSON.stringify(payload) }),
   login: (email: string, password: string, turnstileToken: string) => request<AuthDto>('/auth/login', { method: 'POST', body: JSON.stringify({ email, password, turnstile_token: turnstileToken, website: '' }) }),
   me: () => request<DealerDto>('/auth/me'),
+  updateMe: (payload: { company: string; official: string; city: string; address: string; phone: string }) =>
+    request<DealerDto>('/auth/me', { method: 'PATCH', body: JSON.stringify(payload) }),
   products: (page = 1, size = 100) => request<ProductPageDto>(`/products?page=${page}&size=${size}`),
   exchangeRates: () => request<ExchangeRatesDto>('/exchange-rates'),
   orders: () => request<OrderDto[]>('/orders'),
