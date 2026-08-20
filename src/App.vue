@@ -56,6 +56,7 @@ interface Order {
 const basePath = import.meta.env.BASE_URL.replace(/\/$/, '')
 const appPath = window.location.pathname.slice(basePath.length).replace(/\/$/, '') || '/'
 const isAdminPage = appPath === '/admin'
+document.title = isAdminPage ? 'NDF Makina Yönetim' : 'NDF Makina'
 const notice = ref('')
 const storedSession = localStorage.getItem('ndfDealerSession')
 const currentDealer = ref<Dealer | null>(storedSession ? JSON.parse(storedSession) : null)
