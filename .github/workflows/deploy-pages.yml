@@ -32,7 +32,7 @@ jobs:
         env:
           VITE_BASE_PATH: /
           VITE_API_URL: ${{ vars.VITE_API_URL || 'https://api.ndf.allspacesoftware.com/api/v1' }}
-          VITE_TURNSTILE_SITE_KEY: ${{ vars.VITE_TURNSTILE_SITE_KEY }}
+          VITE_TURNSTILE_SITE_KEY: ${{ vars.VITE_TURNSTILE_SITE_KEY || '0x4AAAAAAEWoBbvl1clbJeZk' }}
       - name: Add SPA fallback
         run: cp dist/index.html dist/404.html
       - name: Setup Pages
