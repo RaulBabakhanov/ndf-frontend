@@ -1,4 +1,4 @@
-const API_URL = import.meta.env.VITE_API_URL ?? 'https://api.ndf.allspacesoftware.com/api/v1'
+const API_URL = import.meta.env.VITE_API_URL ?? 'https://ndf-backend.onrender.com/api/v1'
 
 export interface DealerDto {
   id: number
